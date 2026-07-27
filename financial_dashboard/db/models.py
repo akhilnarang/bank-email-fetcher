@@ -374,6 +374,22 @@ class Transaction(Base):
     currency: Mapped[str | None] = mapped_column(String, default="INR")
     transaction_date: Mapped[datetime.date | None] = mapped_column(Date)
     transaction_time: Mapped[datetime.time | None] = mapped_column(Time)
+    identifies_by: Mapped[str] = mapped_column(
+        String,
+        default="counterparty",
+        server_default=text("'counterparty'"),
+        nullable=False,
+    )
+    """Which field shows which event this row reports, when the counterparty
+    cannot show it. The parser declares this fact. One of ``counterparty``,
+    ``card_mask`` or ``none``."""
+    transaction_time_is_received_time: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    """True when the arrival time of the message supplied transaction_time.
+    The parser declares this fact. Such a time gives the time of the message
+    and not the time of the event. The matcher thus gives this row a window
+    of 1 minute in place of 10 minutes."""
     counterparty: Mapped[str | None] = mapped_column(String)
     card_mask: Mapped[str | None] = mapped_column(String)
     account_mask: Mapped[str | None] = mapped_column(String)

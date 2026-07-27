@@ -17,7 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_dashboard.core.masks import mask_digits, mask_last4
+from financial_dashboard.core.masks import (
+    WILDCARD,
+    mask_digits,
+    mask_matches,
+    normalize_mask,
+)
 from financial_dashboard.db import Transaction
 from financial_dashboard.services.categorization.self_transfer import (
     apply_reference_self_transfer_rule,
@@ -28,7 +33,6 @@ from financial_dashboard.services.email_attachments import (
 )
 from financial_dashboard.services.parser_quirks import (
     AMBIGUOUS_12H_TIME_EMAIL_TYPES,
-    CARD_PAYMENT_LINK_BY_MASK_EMAIL_TYPES,
 )
 
 Channel = Literal["sms", "email"]
@@ -282,6 +286,12 @@ def _incoming_time_is_earlier(existing, incoming: dict, new_time, old_time) -> b
 
 _FUZZY_MATCH_WINDOW_MINUTES = 10
 
+# Window for a transaction_time that the arrival time of a message supplied.
+# In 59 real HDFC pairs the two messages arrive -5 to +14 seconds apart. One
+# minute is thus sufficient for each true pair. It is also much less than the
+# interval between two different payments.
+_RECEIVED_TIME_WINDOW_MINUTES = 1
+
 
 def _normalize_counterparty(s: str | None) -> str:
     if not s:
@@ -297,15 +307,49 @@ def _counterparty_match(a: str | None, b: str | None) -> bool:
 
 
 def _card_payment_mask_match(existing: Transaction, txn_data: dict) -> bool:
-    """True iff both sides are a card payment alert (see
-    CARD_PAYMENT_LINK_BY_MASK_EMAIL_TYPES) on the same card by last-4."""
-    if existing.email_type not in CARD_PAYMENT_LINK_BY_MASK_EMAIL_TYPES:
+    """Tell if both messages report the same card payment.
+
+    Both parsers must declare that the card mask shows the event. You pay
+    your own card bill, so such a message names no merchant and the
+    counterparty cannot show which payment it is.
+
+    Compare the two masks by position. Do not compare only the last four
+    digits: a mask that shows the first digits of a card number and hides
+    the rest ends in a wildcard. Such a mask shows no account, but its last
+    four digits still look like a suffix and would match a different card.
+    """
+    if existing.identifies_by != "card_mask":
         return False
-    if txn_data.get("email_type") not in CARD_PAYMENT_LINK_BY_MASK_EMAIL_TYPES:
+    if txn_data.get("identifies_by") != "card_mask":
         return False
-    existing_last4 = mask_last4(existing.card_mask)
-    incoming_last4 = mask_last4(txn_data.get("card_mask"))
-    return existing_last4 is not None and existing_last4 == incoming_last4
+    stored = normalize_mask(existing.card_mask)
+    incoming = normalize_mask(txn_data.get("card_mask"))
+    if not stored or not incoming:
+        return False
+    # A mask must end in a digit. Without one it identifies no card.
+    if stored[-1] == WILDCARD or incoming[-1] == WILDCARD:
+        return False
+    return mask_matches(incoming, stored) or mask_matches(stored, incoming)
+
+
+def _no_field_identifies_the_event(existing: Transaction, txn_data: dict) -> bool:
+    """Tell if both parsers declare that no field shows which event this is.
+
+    The bank sends no merchant and no card mask for such a message. You pay
+    your own card bill, so there is no merchant, and this bank omits the
+    card. Two payments of the same amount on the same day are thus alike in
+    every field.
+
+    Do not read the counterparty here. Both parsers write the same fixed
+    label, but a statement import can replace that label on a stored row.
+    The label is thus not a property of the event, and a match on it can
+    fail some days after the row is made.
+
+    This function only keeps a candidate. The slot and balance decision that
+    follows still makes the choice, and it defers when more than one
+    candidate remains.
+    """
+    return existing.identifies_by == "none" and txn_data.get("identifies_by") == "none"
 
 
 async def _gather_fuzzy_candidates(
@@ -332,11 +376,23 @@ async def _gather_fuzzy_candidates(
     )
     incoming_time = txn_data.get("transaction_time")
 
-    # Date window: if we have a time, narrow to ±10 min; otherwise whole day.
+    # The body did not contain this time. The arrival time of the message
+    # supplied it. Such a time is weak evidence, because it gives the time of
+    # the message and not the time of the event. Two messages about one event
+    # arrive some seconds apart. Thus give this time a window of that size and
+    # not the full 10 minutes. The small window is sufficient for a true pair.
+    # It is too small to reach a different payment some minutes away.
+    window_minutes = (
+        _RECEIVED_TIME_WINDOW_MINUTES
+        if txn_data.get("transaction_time_is_received_time")
+        else _FUZZY_MATCH_WINDOW_MINUTES
+    )
+
+    # Date window: if we have a time, narrow to the window; otherwise whole day.
     if incoming_time is not None:
         anchor = datetime.combine(txn_date, incoming_time)
-        lower = anchor - timedelta(minutes=_FUZZY_MATCH_WINDOW_MINUTES)
-        upper = anchor + timedelta(minutes=_FUZZY_MATCH_WINDOW_MINUTES)
+        lower = anchor - timedelta(minutes=window_minutes)
+        upper = anchor + timedelta(minutes=window_minutes)
         date_lower, date_upper = lower.date(), upper.date()
     else:
         date_lower = date_upper = txn_date
@@ -363,12 +419,40 @@ async def _gather_fuzzy_candidates(
                 # Other side lacks time — date-only gate applies below.
                 return True
             c_dt = datetime.combine(c.transaction_date, c.transaction_time)
+            if c.transaction_time_is_received_time:
+                # The arrival time of a message also gave this candidate its
+                # time. Thus it limits the pair as much as an incoming time
+                # does. Apply the small window from this side too.
+                c_lower = c_dt - timedelta(minutes=_RECEIVED_TIME_WINDOW_MINUTES)
+                c_upper = c_dt + timedelta(minutes=_RECEIVED_TIME_WINDOW_MINUTES)
+                if not (c_lower <= anchor <= c_upper):
+                    return False
             return lower <= c_dt <= upper
 
         candidates = [c for c in candidates if in_window(c)]
 
     if not candidates:
         return []
+
+    # Divide the candidates by account. Two events on different accounts are
+    # always different events. This is true even if the amount and the time
+    # agree. Compare the two masks by position. Do not compare only the last
+    # four digits, because the first digits of a card number can look like the
+    # last digits. Remove a candidate only if both masks are readable and they
+    # disagree. An absent or unreadable mask is not proof of a difference. If
+    # you remove a candidate for that reason, the code that follows sees an
+    # empty set, calls the event new, and makes a duplicate row.
+    incoming_account = normalize_mask(txn_data.get("account_mask"))
+    if incoming_account:
+        candidates = [
+            c
+            for c in candidates
+            if not (stored := normalize_mask(c.account_mask))
+            or mask_matches(incoming_account, stored)
+            or mask_matches(stored, incoming_account)
+        ]
+        if not candidates:
+            return []
 
     incoming_cp = txn_data.get("counterparty")
 
@@ -383,7 +467,10 @@ async def _gather_fuzzy_candidates(
         ]
         if by_cp:
             return by_cp
-        return [c for c in candidates if _card_payment_mask_match(c, txn_data)]
+        by_mask = [c for c in candidates if _card_payment_mask_match(c, txn_data)]
+        if by_mask:
+            return by_mask
+        return [c for c in candidates if _no_field_identifies_the_event(c, txn_data)]
 
     # Timed window with >1 candidate: counterparty narrows it when it can.
     # A single timed candidate passes through as-is (no counterparty info
@@ -970,6 +1057,17 @@ async def apply_transaction_enrichment(
         setattr(match, key, value)
     for key, (_old, new) in diff.overwritten.items():
         setattr(match, key, new)
+
+    # The column describes the stored transaction_time. Thus it must follow
+    # that value. If it does not, a row can hold a supplied time but claim a
+    # stated one, and the matcher then gives it the wide window of 10 minutes.
+    # Do not put the column in _ENRICHMENT_FIELDS: the rule for an email
+    # channel would overwrite it on its own, and a true value would become
+    # false when a message that states its time does not change the time.
+    if "transaction_time" in diff.changed_fields:
+        match.transaction_time_is_received_time = bool(
+            txn_data.get("transaction_time_is_received_time")
+        )
 
     if match.source != channel and match.source is not None:
         match.source = "sms+email"

@@ -346,6 +346,7 @@ erDiagram
         string currency
         date transaction_date
         time transaction_time
+        bool transaction_time_is_received_time
         string counterparty
         string card_mask
         string account_mask

@@ -552,6 +552,8 @@ async def test_parse_email_by_kind_transaction_does_not_route_to_summary(monkeyp
         ),
         password_hint=None,
         statement=fake_summary,
+        event_time_source="body",
+        identifies_by="counterparty",
     )
 
     monkeypatch.setattr(emails_service, "parse_email", lambda bank, html: fake_parsed)
@@ -609,6 +611,8 @@ async def test_parse_email_by_kind_surfaces_error_when_summary_handler_refuses(
         transaction=None,
         password_hint=None,
         statement=fake_summary,
+        event_time_source="body",
+        identifies_by="counterparty",
     )
 
     monkeypatch.setattr(emails_service, "parse_email", lambda bank, html: fake_parsed)
@@ -654,6 +658,8 @@ async def test_parse_email_by_kind_distinguishes_handler_exception_from_refusal(
         transaction=None,
         password_hint=None,
         statement=fake_summary,
+        event_time_source="body",
+        identifies_by="counterparty",
     )
     monkeypatch.setattr(emails_service, "parse_email", lambda bank, html: fake_parsed)
     monkeypatch.setattr(

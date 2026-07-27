@@ -1413,6 +1413,8 @@ def _icici_payment_sms(**overrides):
         "counterparty": "",
         "card_mask": "XX4321",
         "reference_number": None,
+        # The parser declares this; the pipelines copy it into txn_data.
+        "identifies_by": "card_mask",
     }
     data.update(overrides)
     return data
@@ -1430,6 +1432,8 @@ def _icici_payment_email(**overrides):
         "counterparty": "Payment received",
         "card_mask": "4000 XXXX XXXX 4321",
         "reference_number": None,
+        # The parser declares this; the pipelines copy it into txn_data.
+        "identifies_by": "card_mask",
     }
     data.update(overrides)
     return data

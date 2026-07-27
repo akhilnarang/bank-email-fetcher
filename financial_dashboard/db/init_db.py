@@ -15,6 +15,39 @@ async def init_db(engine) -> None:
         except Exception:
             await conn.execute(text("ALTER TABLE transactions ADD COLUMN note TEXT"))
         try:
+            await conn.execute(text("SELECT identifies_by FROM transactions LIMIT 0"))
+        except Exception:
+            # Existing rows get "counterparty". A row of a shape that the bank
+            # sends with no merchant thus claims that its counterparty shows
+            # the event. The matcher then needs the counterparty to agree, and
+            # it can make a duplicate row. It cannot merge two payments.
+            await conn.execute(
+                text(
+                    "ALTER TABLE transactions ADD COLUMN "
+                    "identifies_by VARCHAR NOT NULL DEFAULT 'counterparty'"
+                )
+            )
+        try:
+            await conn.execute(
+                text(
+                    "SELECT transaction_time_is_received_time FROM transactions LIMIT 0"
+                )
+            )
+        except Exception:
+            # Existing rows get 0, so a row that took the fallback before this
+            # column existed looks like a stated time. Such a row gets the
+            # wide window, and the matcher can then merge a different payment
+            # into it. No row in production has this shape: only the two HDFC
+            # NEFT parsers declare message_arrival, and no row of those types
+            # exists. Backfill the column if you deploy this to a database
+            # that already holds such rows.
+            await conn.execute(
+                text(
+                    "ALTER TABLE transactions ADD COLUMN "
+                    "transaction_time_is_received_time BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+        try:
             await conn.execute(
                 text("SELECT statement_upload_id FROM transactions LIMIT 0")
             )

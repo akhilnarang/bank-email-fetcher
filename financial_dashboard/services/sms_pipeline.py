@@ -91,6 +91,17 @@ def parsed_sms_to_txn_data(parsed: ParsedSms, sms_row: SmsMessage) -> dict | Non
         "channel": txn.channel,
         "balance": Decimal(str(txn.balance.amount)) if txn.balance else None,
         "raw_description": txn.raw_description,
+        # The parser declares where the time of the event comes from. Record
+        # it, because the matcher gives a supplied time a smaller window.
+        # Do not also test whether the parser left the time empty. This
+        # parser fills the time from the time of receipt itself, so that test
+        # is always false and the column would always be false with it.
+        "transaction_time_is_received_time": (
+            parsed.event_time_source == "message_arrival"
+        ),
+        # The parser declares which field shows the event. Record it: the
+        # matcher needs it for a stored row and not only an incoming one.
+        "identifies_by": parsed.identifies_by,
     }
 
 

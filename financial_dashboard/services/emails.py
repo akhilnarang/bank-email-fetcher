@@ -205,7 +205,30 @@ def _process_email_full(bank: str, raw_bytes: bytes) -> ProcessedEmailParse:
         transaction_date = received_at.date()
 
     transaction_time = txn.transaction_time
+    time_is_received_time = False
     if (
+        transaction_time is None
+        and received_at is not None
+        and parsed.event_time_source == "message_arrival"
+    ):
+        # The bank sends this email at the moment of the transaction. Thus the
+        # arrival time replaces the time that the body does not contain. Get
+        # the date and the time from ONE conversion to IST. An email that
+        # arrives immediately after midnight IST has a different IST date than
+        # its UTC date. Two separate conversions can thus give two different
+        # moments.
+        if received_at.tzinfo is None:
+            # A Date header with an unknown zone gives no time zone. Use IST.
+            received_ist = received_at.replace(tzinfo=_IST)
+        else:
+            received_ist = received_at.astimezone(_IST)
+        transaction_time = received_ist.time().replace(microsecond=0)
+        time_is_received_time = True
+        if txn.transaction_date is None:
+            # Replace the date only if the body has none. A date from the body
+            # is correct. Do not move it to agree with the arrival time.
+            transaction_date = received_ist.date()
+    elif (
         transaction_time is not None
         and parsed.email_type in _AMBIGUOUS_12H_TIME_EMAIL_TYPES
     ):
@@ -230,6 +253,10 @@ def _process_email_full(bank: str, raw_bytes: bytes) -> ProcessedEmailParse:
             "channel": txn.channel,
             "balance": Decimal(str(txn.balance.amount)) if txn.balance else None,
             "raw_description": txn.raw_description,
+            "transaction_time_is_received_time": time_is_received_time,
+            # The parser declares which field shows the event. Record it: the
+            # matcher needs it for a stored row and not only an incoming one.
+            "identifies_by": parsed.identifies_by,
         },
         password_hint,
         parsed,
