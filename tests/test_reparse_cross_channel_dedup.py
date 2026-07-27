@@ -692,3 +692,85 @@ async def test_reparse_does_not_steal_row_claimed_by_another_email(session_maker
         by_email = {r.email_id: r for r in rows}
         assert by_email[email_a_id].email_id == email_a_id
         assert by_email[email_b_id].email_id == email_b_id
+
+
+@pytest.mark.anyio
+async def test_reparse_that_enriches_sends_one_enrichment_message(session_maker):
+    """The email for an event that the SMS already captured adds data to that
+    row. Tell the user that the row changed. Do not send a second message
+    about a new transaction, because there is only one payment.
+    """
+    _sms_txn_id, email_id = await _seed_sms_row_and_failed_email(session_maker)
+
+    raw = _hdfc_ppf_transfer_eml()
+    with (
+        patch(
+            "financial_dashboard.web.emails.load_or_fetch_raw_email",
+            new=AsyncMock(return_value=RawEmailResult(raw, None, "provider")),
+        ),
+        patch(
+            "financial_dashboard.web.emails.should_notify_transactions",
+            return_value=True,
+        ),
+        patch("financial_dashboard.web.emails.get_telegram_chat_id", return_value=1),
+        patch(
+            "financial_dashboard.web.emails.send_enrichment_notification",
+            new=AsyncMock(),
+        ) as enrich_msg,
+        patch(
+            "financial_dashboard.web.emails.send_transaction_notification",
+            new=AsyncMock(),
+        ) as txn_msg,
+    ):
+        app = _build_test_app(session_maker)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            r = await client.post(f"/emails/{email_id}/reparse")
+            assert r.status_code == 200, r.text
+
+    assert enrich_msg.await_count == 1
+    assert txn_msg.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_reparse_that_makes_a_row_sends_a_transaction_message(session_maker):
+    """With no row from another channel, the email makes the row. The user
+    must then get a message about a new transaction."""
+    _sms_txn_id, email_id = await _seed_sms_row_and_failed_email(session_maker)
+    # Remove the row from the other channel, so this email has nothing to
+    # add data to and must make its own row.
+    async with session_maker() as s:
+        for row in (await s.execute(select(Transaction))).scalars().all():
+            await s.delete(row)
+        await s.commit()
+
+    raw = _hdfc_ppf_transfer_eml()
+    with (
+        patch(
+            "financial_dashboard.web.emails.load_or_fetch_raw_email",
+            new=AsyncMock(return_value=RawEmailResult(raw, None, "provider")),
+        ),
+        patch(
+            "financial_dashboard.web.emails.should_notify_transactions",
+            return_value=True,
+        ),
+        patch("financial_dashboard.web.emails.get_telegram_chat_id", return_value=1),
+        patch(
+            "financial_dashboard.web.emails.send_enrichment_notification",
+            new=AsyncMock(),
+        ) as enrich_msg,
+        patch(
+            "financial_dashboard.web.emails.send_transaction_notification",
+            new=AsyncMock(),
+        ) as txn_msg,
+    ):
+        app = _build_test_app(session_maker)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            r = await client.post(f"/emails/{email_id}/reparse")
+            assert r.status_code == 200, r.text
+
+    assert txn_msg.await_count == 1
+    assert enrich_msg.await_count == 0

@@ -74,6 +74,7 @@ from financial_dashboard.services.settings import (
 from financial_dashboard.services.telegram import (
     build_account_label,
     send_disambiguation_prompt,
+    send_enrichment_notification,
     send_transaction_notification,
 )
 
@@ -316,6 +317,10 @@ class _ReparseTxnResult(NamedTuple):
     deferred_noop: bool
     pending_payment_check: tuple[int, int, Decimal] | None
     pending_disambiguation: dict | None
+    enrichment_diff: object | None = None
+    """Set when this email added data to a row that another channel had
+    already made. The caller then sends an enrichment message. Typed as
+    object to avoid an import cycle with txn_merge."""
 
 
 async def _mark_recognized_non_transaction_skipped(
@@ -391,6 +396,10 @@ async def _apply_reparsed_transaction(
     """
     txn_id = None
     deferred_noop = False
+    # Set when this email added data to a row that another channel had
+    # already made. The caller then sends an enrichment message and not a
+    # message about a new transaction.
+    enrichment_diff = None
     pending_payment_check: tuple[int, int, Decimal] | None = None
     pending_disambiguation: dict | None = None
 
@@ -459,9 +468,11 @@ async def _apply_reparsed_transaction(
             # and applies downgrade-safe field merges (so a richer SMS value
             # like an in-body time is not clobbered by the email's null). It
             # does NOT clear FKs, so an already-linked row keeps its account.
-            merge_outcome, txn_row, _ = await merge_transaction(
+            merge_outcome, txn_row, merge_diff = await merge_transaction(
                 session, "email", txn_data, email_id=em.id
             )
+            if merge_outcome == "enriched" and merge_diff.changed_fields:
+                enrichment_diff = merge_diff
             if merge_outcome == "deferred":
                 # The destination email slot may have been claimed after the
                 # initial match. Preserve the source for later review instead
@@ -549,7 +560,11 @@ async def _apply_reparsed_transaction(
                 )
 
     return _ReparseTxnResult(
-        txn_id, deferred_noop, pending_payment_check, pending_disambiguation
+        txn_id,
+        deferred_noop,
+        pending_payment_check,
+        pending_disambiguation,
+        enrichment_diff,
     )
 
 
@@ -701,6 +716,7 @@ async def reparse_email(
         deferred_noop = False
         pending_payment_check: tuple[int, int, Decimal] | None = None
         pending_disambiguation: dict | None = None
+        enrichment_diff = None
         if txn_data:
             try:
                 (
@@ -708,6 +724,7 @@ async def reparse_email(
                     deferred_noop,
                     pending_payment_check,
                     pending_disambiguation,
+                    enrichment_diff,
                 ) = await _apply_reparsed_transaction(
                     session,
                     em,
@@ -736,12 +753,23 @@ async def reparse_email(
     if duplicate_error:
         raise ConflictException(detail=duplicate_error)
 
-    # Send Telegram notification for the new transaction
+    # Tell the user what happened. This email can make a row, or it can add
+    # data to a row that the SMS for the same event already made. Send a
+    # message about a new transaction only in the first case. Otherwise the
+    # user gets two messages about one payment.
     if txn_id and txn_data and should_notify_transactions():
+        chat_id = get_telegram_chat_id()
         try:
-            await send_transaction_notification(
-                txn_id, txn_data, get_telegram_chat_id()
-            )
+            if enrichment_diff is not None:
+                await send_enrichment_notification(
+                    txn_id,
+                    enrichment_diff,
+                    chat_id,
+                    source="email",
+                    txn_info=txn_data,
+                )
+            else:
+                await send_transaction_notification(txn_id, txn_data, chat_id)
         except Exception as tg_err:
             logger.warning(
                 "Telegram notification failed for reparsed txn #%s: %s", txn_id, tg_err
@@ -918,6 +946,9 @@ async def reparse_all_failed(
                         bulk_deferred_noop,
                         pending_payment_check,
                         pending_disambiguation,
+                        # The bulk route sends one summary and no per-row
+                        # message, so it does not use the diff.
+                        _bulk_enrichment_diff,
                     ) = await _apply_reparsed_transaction(
                         session,
                         em,
