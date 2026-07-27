@@ -321,6 +321,9 @@ class _ReparseTxnResult(NamedTuple):
     """Set when this email added data to a row that another channel had
     already made. The caller then sends an enrichment message. Typed as
     object to avoid an import cycle with txn_merge."""
+    joined_existing_row: bool = False
+    """True when this email joined a row that already existed. The caller
+    then sends no message about a new transaction."""
 
 
 async def _mark_recognized_non_transaction_skipped(
@@ -400,6 +403,9 @@ async def _apply_reparsed_transaction(
     # already made. The caller then sends an enrichment message and not a
     # message about a new transaction.
     enrichment_diff = None
+    # True when this email joined a row that already existed. The caller then
+    # sends no message about a new transaction, even if nothing changed.
+    joined_existing_row = False
     pending_payment_check: tuple[int, int, Decimal] | None = None
     pending_disambiguation: dict | None = None
 
@@ -471,8 +477,10 @@ async def _apply_reparsed_transaction(
             merge_outcome, txn_row, merge_diff = await merge_transaction(
                 session, "email", txn_data, email_id=em.id
             )
-            if merge_outcome == "enriched" and merge_diff.changed_fields:
-                enrichment_diff = merge_diff
+            if merge_outcome == "enriched":
+                joined_existing_row = True
+                if merge_diff.changed_fields:
+                    enrichment_diff = merge_diff
             if merge_outcome == "deferred":
                 # The destination email slot may have been claimed after the
                 # initial match. Preserve the source for later review instead
@@ -482,6 +490,9 @@ async def _apply_reparsed_transaction(
                 em.error = DUP_DEFER_NOTE
                 deferred_noop = True
         elif existing is not None:
+            # This email already owns a row. It refreshes that row, so it
+            # makes nothing new.
+            joined_existing_row = True
             # In-place refresh to pick up parser fixes. Skip None values so a
             # field already enriched from another source (e.g. an SMS-only
             # balance or a richer counterparty) is not clobbered by an email
@@ -574,6 +585,7 @@ async def _apply_reparsed_transaction(
         pending_payment_check,
         pending_disambiguation,
         enrichment_diff,
+        joined_existing_row,
     )
 
 
@@ -726,6 +738,7 @@ async def reparse_email(
         pending_payment_check: tuple[int, int, Decimal] | None = None
         pending_disambiguation: dict | None = None
         enrichment_diff = None
+        joined_existing_row = False
         if txn_data:
             try:
                 (
@@ -734,6 +747,7 @@ async def reparse_email(
                     pending_payment_check,
                     pending_disambiguation,
                     enrichment_diff,
+                    joined_existing_row,
                 ) = await _apply_reparsed_transaction(
                     session,
                     em,
@@ -777,7 +791,10 @@ async def reparse_email(
                     source="email",
                     txn_info=txn_data,
                 )
-            else:
+            elif not joined_existing_row:
+                # The email made this row, so tell the user about a new
+                # transaction. Say nothing when the email joined a row that
+                # already existed and changed none of its fields.
                 await send_transaction_notification(txn_id, txn_data, chat_id)
         except Exception as tg_err:
             logger.warning(
@@ -956,8 +973,9 @@ async def reparse_all_failed(
                         pending_payment_check,
                         pending_disambiguation,
                         # The bulk route sends one summary and no per-row
-                        # message, so it does not use the diff.
+                        # message, so it uses neither of these.
                         _bulk_enrichment_diff,
+                        _bulk_joined_existing_row,
                     ) = await _apply_reparsed_transaction(
                         session,
                         em,

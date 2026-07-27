@@ -774,3 +774,50 @@ async def test_reparse_that_makes_a_row_sends_a_transaction_message(session_make
 
     assert txn_msg.await_count == 1
     assert enrich_msg.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_a_second_reparse_that_changes_nothing_sends_no_message(session_maker):
+    """Reparse the same email twice. The first run adds the email data to the
+    row that the SMS made. The second run finds the same row and changes no
+    field.
+
+    Send nothing. The row is not new, so a message about a new transaction is
+    wrong. No field changed, so an enrichment message says nothing.
+    """
+    _sms_txn_id, email_id = await _seed_sms_row_and_failed_email(session_maker)
+
+    raw = _hdfc_ppf_transfer_eml()
+    with (
+        patch(
+            "financial_dashboard.web.emails.load_or_fetch_raw_email",
+            new=AsyncMock(return_value=RawEmailResult(raw, None, "provider")),
+        ),
+        patch(
+            "financial_dashboard.web.emails.should_notify_transactions",
+            return_value=True,
+        ),
+        patch("financial_dashboard.web.emails.get_telegram_chat_id", return_value=1),
+        patch(
+            "financial_dashboard.web.emails.send_enrichment_notification",
+            new=AsyncMock(),
+        ) as enrich_msg,
+        patch(
+            "financial_dashboard.web.emails.send_transaction_notification",
+            new=AsyncMock(),
+        ) as txn_msg,
+    ):
+        app = _build_test_app(session_maker)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            first = await client.post(f"/emails/{email_id}/reparse")
+            assert first.status_code == 200, first.text
+            enrich_msg.reset_mock()
+            txn_msg.reset_mock()
+
+            second = await client.post(f"/emails/{email_id}/reparse")
+            assert second.status_code == 200, second.text
+
+    assert txn_msg.await_count == 0, "the row is not new"
+    assert enrich_msg.await_count == 0, "no field changed"
