@@ -488,8 +488,17 @@ async def _apply_reparsed_transaction(
             # whose txn_data carries that field as None — the email txn_data
             # always contains every key, including ones the email couldn't
             # provide. Non-None parser values still overwrite as before.
+            # These two columns describe the stored transaction_time and the
+            # parser that made the row. This loop must not write them. It
+            # would set them from the email while the row keeps a time that
+            # the SMS supplied, and the row would then claim a time source
+            # that it does not have.
+            _describes_the_stored_row = (
+                "transaction_time_is_received_time",
+                "identifies_by",
+            )
             for key, value in txn_data.items():
-                if value is not None:
+                if value is not None and key not in _describes_the_stored_row:
                     setattr(existing, key, value)
             existing.account_id = None
             existing.card_id = None
