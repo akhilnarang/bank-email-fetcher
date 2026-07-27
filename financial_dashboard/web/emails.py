@@ -64,6 +64,7 @@ from financial_dashboard.services.reminders import check_payment_received
 from financial_dashboard.services.txn_merge import (
     DUP_DEFER_NOTE,
     DUP_DEFER_PREFIX,
+    EnrichmentDiff,
     find_match,
     merge_transaction,
 )
@@ -318,9 +319,8 @@ class _ReparseTxnResult(NamedTuple):
     pending_payment_check: tuple[int, int, Decimal] | None
     pending_disambiguation: dict | None
     enrichment_diff: object | None = None
-    """Set when this email added data to a row that another channel had
-    already made. The caller then sends an enrichment message. Typed as
-    object to avoid an import cycle with txn_merge."""
+    """Set when this email changed a row that already existed. The caller
+    then sends an enrichment message."""
     joined_existing_row: bool = False
     """True when this email joined a row that already existed. The caller
     then sends no message about a new transaction."""
@@ -399,9 +399,8 @@ async def _apply_reparsed_transaction(
     """
     txn_id = None
     deferred_noop = False
-    # Set when this email added data to a row that another channel had
-    # already made. The caller then sends an enrichment message and not a
-    # message about a new transaction.
+    # Set when this email changed a row that already existed. The caller then
+    # sends an enrichment message and not a message about a new transaction.
     enrichment_diff = None
     # True when this email joined a row that already existed. The caller then
     # sends no message about a new transaction, even if nothing changed.
@@ -508,9 +507,26 @@ async def _apply_reparsed_transaction(
                 "transaction_time_is_received_time",
                 "identifies_by",
             )
+            previous_transaction_time = existing.transaction_time
+            refresh_diff = EnrichmentDiff()
             for key, value in txn_data.items():
                 if value is not None and key not in _describes_the_stored_row:
+                    previous_value = getattr(existing, key)
+                    if previous_value is None:
+                        refresh_diff.filled[key] = value
+                    elif previous_value != value:
+                        refresh_diff.overwritten[key] = (previous_value, value)
                     setattr(existing, key, value)
+            if existing.transaction_time != previous_transaction_time:
+                # This column describes the stored time. If a refresh changes
+                # the time, it must also change the time source. If it does
+                # not, the matcher can use the unsafe 10-minute window for a
+                # time that came from message arrival.
+                existing.transaction_time_is_received_time = bool(
+                    txn_data["transaction_time_is_received_time"]
+                )
+            if refresh_diff.changed_fields:
+                enrichment_diff = refresh_diff
             existing.account_id = None
             existing.card_id = None
             txn_row = existing

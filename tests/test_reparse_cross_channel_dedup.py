@@ -78,6 +78,21 @@ def _hdfc_ppf_transfer_eml() -> bytes:
     return msg.as_bytes()
 
 
+def _hdfc_neft_eml() -> bytes:
+    """HDFC outward-NEFT email. Its event time comes from message arrival."""
+    msg = EmailMessage()
+    msg["Subject"] = "View: Account update for your HDFC Bank A/c"
+    msg["From"] = "HDFC Bank InstaAlerts <alerts@hdfcbank.bank.in>"
+    msg["Date"] = "Sun, 26 Jul 2026 19:33:51 +0000"
+    msg.set_content(
+        "Dear Customer, Rs. 1,234.56 has been deducted from your HDFC Bank "
+        "account ending in XX0000 for a transfer to payee Sample Payee via "
+        "NEFT using HDFC Bank Online Banking. Not you? Call 00000000000 from "
+        "your registered mobile number."
+    )
+    return msg.as_bytes()
+
+
 async def _seed_sms_row_and_failed_email(maker) -> tuple[int, int]:
     """Seed an existing SMS-sourced HDFC transfer Transaction (no email
     attached) plus a matching failed Email row. Returns (sms_txn_id,
@@ -821,3 +836,93 @@ async def test_a_second_reparse_that_changes_nothing_sends_no_message(session_ma
 
     assert txn_msg.await_count == 0, "the row is not new"
     assert enrich_msg.await_count == 0, "no field changed"
+
+
+@pytest.mark.anyio
+async def test_reparse_moves_received_time_provenance_with_a_changed_time(
+    session_maker,
+):
+    """The time-source flag describes the stored transaction time.
+
+    A parser fix can make a reparse change the time. If the new time comes
+    from message arrival, the flag must change to true. If the flag stays
+    false, the matcher uses the unsafe 10-minute window.
+    """
+    async with session_maker() as session:
+        rule = FetchRule(
+            provider="gmail",
+            sender="alerts@hdfcbank.bank.in",
+            bank="hdfc",
+            enabled=True,
+            email_kind="transaction",
+        )
+        session.add(rule)
+        await session.flush()
+        email_row = Email(
+            provider="gmail",
+            message_id="test-hdfc-neft-time-provenance",
+            sender="alerts@hdfcbank.bank.in",
+            subject="View: Account update for your HDFC Bank A/c",
+            received_at=datetime.datetime(2026, 7, 26, 19, 33, 51, tzinfo=datetime.UTC),
+            status="failed",
+            error="Previous parser supplied a different time",
+            rule_id=rule.id,
+        )
+        session.add(email_row)
+        await session.flush()
+        transaction = Transaction(
+            email_id=email_row.id,
+            bank="hdfc",
+            email_type="hdfc_account_neft_debit_alert",
+            direction="debit",
+            amount=Decimal("1234.56"),
+            currency="INR",
+            transaction_date=datetime.date(2026, 7, 26),
+            transaction_time=datetime.time(19, 33, 0),
+            transaction_time_is_received_time=False,
+            source="email",
+        )
+        session.add(transaction)
+        await session.commit()
+        email_id = email_row.id
+        txn_id = transaction.id
+
+    with (
+        patch(
+            "financial_dashboard.web.emails.load_or_fetch_raw_email",
+            new=AsyncMock(
+                return_value=RawEmailResult(_hdfc_neft_eml(), None, "provider")
+            ),
+        ),
+        patch(
+            "financial_dashboard.web.emails.should_notify_transactions",
+            return_value=True,
+        ),
+        patch("financial_dashboard.web.emails.get_telegram_chat_id", return_value=1),
+        patch(
+            "financial_dashboard.web.emails.send_enrichment_notification",
+            new=AsyncMock(),
+        ) as enrich_msg,
+        patch(
+            "financial_dashboard.web.emails.send_transaction_notification",
+            new=AsyncMock(),
+        ) as txn_msg,
+    ):
+        app = _build_test_app(session_maker)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/emails/{email_id}/reparse")
+            assert response.status_code == 200, response.text
+
+    assert enrich_msg.await_count == 1, "the existing row changed"
+    assert txn_msg.await_count == 0, "the row is not new"
+    diff = enrich_msg.await_args.args[1]
+    assert "transaction_time" in diff.overwritten
+
+    async with session_maker() as session:
+        stored = await session.get(Transaction, txn_id)
+        assert stored is not None
+        assert stored.transaction_date == datetime.date(2026, 7, 27)
+        assert stored.transaction_time == datetime.time(1, 3, 51)
+        assert stored.transaction_time_is_received_time is True
