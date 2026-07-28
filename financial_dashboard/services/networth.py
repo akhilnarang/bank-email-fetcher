@@ -3,6 +3,7 @@
 import datetime
 from collections import defaultdict
 from decimal import Decimal
+from typing import cast
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -130,15 +131,20 @@ async def current_networth(
         if snapshot.category == SnapshotCategory.investment.value:
             investment_snapshot_ids.append(snapshot.id)
 
-    groups = [
-        CategoryGroup(
-            category=category,
-            kind=kind,
-            total=sum((row.value for row in rows), Decimal("0.00")),
-            rows=sorted(rows, key=lambda row: row.label.lower()),
+    groups: list[CategoryGroup] = []
+    for category, kind in sorted(grouped):
+        rows = grouped[(category, kind)]
+        groups.append(
+            CategoryGroup(
+                category=category,
+                kind=kind,
+                total=sum((row.value for row in rows), Decimal("0.00")),
+                rows=sorted(
+                    rows,
+                    key=lambda row: cast(SourceBalance, row).label.lower(),
+                ),
+            )
         )
-        for (category, kind), rows in sorted(grouped.items())
-    ]
 
     investment_breakdown: list[HoldingBreakdown] = []
     if investment_snapshot_ids:

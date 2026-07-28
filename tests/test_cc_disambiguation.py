@@ -494,12 +494,21 @@ async def test_resolver_outstanding_match(session):
     a, b, c = await _seed_three_indusind_ccs(session)
     session.add_all(
         [
-            _stmt(account_id=a, total="8,347.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("1347")),
-            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
-                  paid=Decimal("512")),
-            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
-                  paid=Decimal("0")),
+            _stmt(
+                account_id=a,
+                total="8,347.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("1347"),
+            ),
+            _stmt(
+                account_id=b,
+                total="512.00",
+                status=PaymentStatus.PAID,
+                paid=Decimal("512"),
+            ),
+            _stmt(
+                account_id=c, total="0.00", status=PaymentStatus.PAID, paid=Decimal("0")
+            ),
         ]
     )
     await session.flush()
@@ -517,8 +526,12 @@ async def test_resolver_outstanding_match_ambiguous_falls_through(session):
     session.add_all(
         [
             _stmt(account_id=a, total="1,200.00", status=PaymentStatus.UNPAID),
-            _stmt(account_id=b, total="1,700.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("500")),
+            _stmt(
+                account_id=b,
+                total="1,700.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("500"),
+            ),
             _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID),
         ]
     )
@@ -536,10 +549,18 @@ async def test_resolver_outstanding_match_both_outstanding_same(session):
     a, b, c = await _seed_three_indusind_ccs(session)
     session.add_all(
         [
-            _stmt(account_id=a, total="2,300.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("600")),
-            _stmt(account_id=b, total="3,400.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("1700")),
+            _stmt(
+                account_id=a,
+                total="2,300.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("600"),
+            ),
+            _stmt(
+                account_id=b,
+                total="3,400.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("1700"),
+            ),
             _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID),
         ]
     )
@@ -560,12 +581,21 @@ async def test_resolver_sole_outstanding(session):
     a, b, c = await _seed_three_indusind_ccs(session)
     session.add_all(
         [
-            _stmt(account_id=a, total="8,347.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("1347")),
-            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
-                  paid=Decimal("512")),
-            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
-                  paid=Decimal("0")),
+            _stmt(
+                account_id=a,
+                total="8,347.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("1347"),
+            ),
+            _stmt(
+                account_id=b,
+                total="512.00",
+                status=PaymentStatus.PAID,
+                paid=Decimal("512"),
+            ),
+            _stmt(
+                account_id=c, total="0.00", status=PaymentStatus.PAID, paid=Decimal("0")
+            ),
         ]
     )
     await session.flush()
@@ -582,12 +612,21 @@ async def test_resolver_sole_outstanding_rejects_overpayment(session):
     a, b, c = await _seed_three_indusind_ccs(session)
     session.add_all(
         [
-            _stmt(account_id=a, total="6,200.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("2200")),
-            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
-                  paid=Decimal("512")),
-            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
-                  paid=Decimal("0")),
+            _stmt(
+                account_id=a,
+                total="6,200.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("2200"),
+            ),
+            _stmt(
+                account_id=b,
+                total="512.00",
+                status=PaymentStatus.PAID,
+                paid=Decimal("512"),
+            ),
+            _stmt(
+                account_id=c, total="0.00", status=PaymentStatus.PAID, paid=Decimal("0")
+            ),
         ]
     )
     await session.flush()
@@ -604,11 +643,16 @@ async def test_resolver_sole_outstanding_skips_untracked(session):
     a, b, c = await _seed_three_indusind_ccs(session)
     session.add_all(
         [
-            _stmt(account_id=a, total="6,200.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("2200")),
+            _stmt(
+                account_id=a,
+                total="6,200.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("2200"),
+            ),
             _stmt(account_id=b, total="819.00", status=None),
-            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
-                  paid=Decimal("0")),
+            _stmt(
+                account_id=c, total="0.00", status=PaymentStatus.PAID, paid=Decimal("0")
+            ),
         ]
     )
     await session.flush()
@@ -628,8 +672,9 @@ async def test_resolver_multiple_outstanding_prompts(session):
         [
             _stmt(account_id=a, total="5,700.00", status=PaymentStatus.UNPAID),
             _stmt(account_id=b, total="3,100.00", status=PaymentStatus.UNPAID),
-            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
-                  paid=Decimal("0")),
+            _stmt(
+                account_id=c, total="0.00", status=PaymentStatus.PAID, paid=Decimal("0")
+            ),
         ]
     )
     await session.flush()
@@ -665,10 +710,18 @@ async def test_resolver_outstanding_skips_when_candidate_has_no_statement(sessio
     a, b, c = await _seed_three_indusind_ccs(session)
     session.add_all(
         [
-            _stmt(account_id=a, total="9,400.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("4400")),
-            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
-                  paid=Decimal("512")),
+            _stmt(
+                account_id=a,
+                total="9,400.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("4400"),
+            ),
+            _stmt(
+                account_id=b,
+                total="512.00",
+                status=PaymentStatus.PAID,
+                paid=Decimal("512"),
+            ),
         ]
     )
     await session.flush()
@@ -685,11 +738,16 @@ async def test_resolver_outstanding_match_skips_when_untracked(session):
     a, b, c = await _seed_three_indusind_ccs(session)
     session.add_all(
         [
-            _stmt(account_id=a, total="8,347.00", status=PaymentStatus.PARTIALLY_PAID,
-                  paid=Decimal("1347")),
+            _stmt(
+                account_id=a,
+                total="8,347.00",
+                status=PaymentStatus.PARTIALLY_PAID,
+                paid=Decimal("1347"),
+            ),
             _stmt(account_id=b, total="819.00", status=None),
-            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
-                  paid=Decimal("0")),
+            _stmt(
+                account_id=c, total="0.00", status=PaymentStatus.PAID, paid=Decimal("0")
+            ),
         ]
     )
     await session.flush()

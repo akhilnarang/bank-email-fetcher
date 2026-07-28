@@ -33,6 +33,9 @@ build-backend = "hatchling.build"
 [tool.fastapi]
 entrypoint = "financial_dashboard.main:create_app"
 
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.uv.sources]
 bank-email-parser = { git = "https://github.com/akhilnarang/bank-email-parser" }
 bank-sms-parser = { git = "https://github.com/akhilnarang/bank-sms-parser" }

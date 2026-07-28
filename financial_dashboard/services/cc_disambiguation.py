@@ -343,22 +343,29 @@ async def resolve_cc_payment_account(
     if not has_untracked and len(outstanding_matches) == 1:
         logger.info(
             "CC disambiguation: outstanding-match for bank=%r amount=%s → account %d",
-            txn_row.bank, target, outstanding_matches[0],
+            txn_row.bank,
+            target,
+            outstanding_matches[0],
         )
         txn_row.account_id = outstanding_matches[0]
         await session.flush()
         return None
 
-    if (
-        not has_untracked
-        and len(accounts_with_outstanding) == 1
-        and target <= _parse_outstanding(
-            next(u for u in latest if u.account_id == accounts_with_outstanding[0])
+    sole_outstanding = None
+    if not has_untracked and len(accounts_with_outstanding) == 1:
+        sole_upload = next(
+            upload
+            for upload in latest
+            if upload.account_id == accounts_with_outstanding[0]
         )
-    ):
+        sole_outstanding = _parse_outstanding(sole_upload)
+
+    if sole_outstanding is not None and target <= sole_outstanding:
         logger.info(
             "CC disambiguation: sole-outstanding for bank=%r amount=%s → account %d",
-            txn_row.bank, target, accounts_with_outstanding[0],
+            txn_row.bank,
+            target,
+            accounts_with_outstanding[0],
         )
         txn_row.account_id = accounts_with_outstanding[0]
         await session.flush()
