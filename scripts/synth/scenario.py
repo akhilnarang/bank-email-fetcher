@@ -2675,6 +2675,7 @@ _CREDIT_CATEGORIES = frozenset(
         "refund",
         "investment_redemption",
         "repayment",
+        "tax_refund",
     }
 )
 
@@ -2705,6 +2706,7 @@ _CATEGORY_COUNTERPARTY: dict[str, str] = {
     "personal_care": "SALON & SPA",
     "repayment": "LOAN REPAYMENT",
     "tax": "INCOME TAX DEPT",
+    "tax_refund": "INCOME TAX REFUND",
 }
 
 

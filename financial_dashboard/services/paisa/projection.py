@@ -105,7 +105,7 @@ from financial_dashboard.services.settings import get_setting
 # direction alone. This is what makes reversals net correctly and keeps asset
 # movements out of the P&L:
 #
-# * ``income`` slugs (salary/interest/other_income) → Income root (always)
+# * ``income`` slugs (salary/interest/other_income/tax_refund) → Income root
 # * expense slugs → Expenses root (always) — a credit on an expense slug is a
 #   reversal that nets against the expense, never relabelled as Income.
 # * ``refund``/``cashback_rewards`` → contra-expense: Expenses root (negative

@@ -32,7 +32,7 @@ from financial_dashboard.services.paisa.renderers.base import (
 SELF_TRANSFER_SLUG = "self_transfer"
 CREDIT_CARD_PAYMENT_SLUG = "credit_card_payment"
 
-INCOME_CATEGORY_SLUGS = frozenset({"salary", "interest", "other_income"})
+INCOME_CATEGORY_SLUGS = frozenset({"salary", "interest", "other_income", "tax_refund"})
 CONTRA_EXPENSE_CATEGORY_SLUGS = frozenset({"refund", "cashback_rewards"})
 INVESTMENT_CATEGORY_SLUGS = frozenset({"investment", "investment_redemption"})
 

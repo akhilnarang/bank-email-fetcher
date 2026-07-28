@@ -126,6 +126,36 @@ def test_every_generated_entry_balances_to_zero():
         assert total == 0
 
 
+@pytest.mark.parametrize(
+    ("category", "direction", "has_account_mask", "first_sign"),
+    [
+        ("tax_refund", "credit", True, -1),
+        ("salary", "credit", True, 1),
+        ("credit_card_payment", "debit", True, 1),
+        ("credit_card_payment", "credit", False, 1),
+        ("self_transfer", "debit", True, 1),
+        ("self_transfer", "credit", True, 1),
+    ],
+)
+def test_pure_corpus_preserves_transaction_polarity(
+    category, direction, has_account_mask, first_sign
+):
+    scenario = build_scenario(profile="golden")
+    txn = next(
+        t
+        for t in scenario.transactions
+        if t.category == category
+        and t.direction == direction
+        and (t.account_mask is not None) == has_account_mask
+    )
+    entry = _entry_from_transaction(txn)
+
+    first, counterpart = entry.postings
+    assert first.amount == txn.amount * first_sign
+    assert counterpart.account == txn.ledger_counterpart
+    assert counterpart.amount == txn.amount * -first_sign
+
+
 def test_no_payee_can_inject_a_directive():
     """A crafted counterparty must never start a new dated entry or an account
     directive — it has to stay inside the dated header line it belongs to."""

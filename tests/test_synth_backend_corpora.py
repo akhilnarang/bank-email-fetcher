@@ -19,6 +19,7 @@ from scripts.synth import build_scenario
 from scripts.synth.backends import (
     BACKEND_IDS,
     MAX_BACKEND_ENTRIES,
+    _build_document,
     build_backend_corpora,
 )
 
@@ -66,6 +67,41 @@ def test_backend_corpus_meta_describes_inputs():
     assert meta["profile"] == scenario.profile
     assert meta["lot_count"] >= 1
     assert "USD" in meta["currencies"]  # multi-currency represented
+
+
+@pytest.mark.parametrize(
+    ("category", "direction", "has_account_mask", "first_sign"),
+    [
+        ("tax_refund", "credit", True, -1),
+        ("salary", "credit", True, 1),
+        ("credit_card_payment", "debit", True, 1),
+        ("credit_card_payment", "credit", False, 1),
+    ],
+)
+def test_backend_document_preserves_transaction_polarity(
+    category, direction, has_account_mask, first_sign
+):
+    scenario = build_scenario(profile="golden")
+    txn = next(
+        t
+        for t in scenario.transactions
+        if t.category == category
+        and t.direction == direction
+        and (t.account_mask is not None) == has_account_mask
+    )
+    document, _ = _build_document(scenario, max_entries=len(scenario.transactions))
+    entry = next(
+        row
+        for row in document.entries
+        if row.date == txn.transaction_date
+        and row.payee == txn.counterparty
+        and row.postings[0].account == txn.ledger_account
+    )
+
+    first, counterpart = entry.postings
+    assert first.amount == txn.amount * first_sign
+    assert counterpart.account == txn.ledger_counterpart
+    assert counterpart.amount == txn.amount * -first_sign
 
 
 # ---------------------------------------------------------------------------

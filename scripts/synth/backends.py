@@ -43,6 +43,7 @@ from financial_dashboard.services.paisa.renderers.base import (
     sanitize_commodity,
 )
 from scripts.synth import constants as C
+from scripts.synth.accounting import first_posting_sign
 from scripts.synth.models import Scenario, SynthTransaction
 
 #: Cap so even a stress scenario yields a hand-reviewable corpus. The high-volume
@@ -178,11 +179,11 @@ def _build_document(scenario: Scenario, max_entries: int) -> tuple[LedgerDocumen
     def _add_entry(t: SynthTransaction, *, commodity: str, with_price: bool) -> None:
         if t is None:
             return
-        sign = 1 if t.direction == C.DIRECTION_CREDIT else -1
+        # Scenario rows can put either the source or category account first.
+        # Derive polarity from that role so this production-renderer corpus
+        # stays equivalent to the pure synthetic corpus.
+        sign = first_posting_sign(t)
         contra_sign = -sign
-        # Income is credit-normal: invert so the entry balances to zero.
-        if (t.ledger_account or "").startswith("Income"):
-            sign, contra_sign = -contra_sign, -sign
         entries.append(
             ProjectedEntry(
                 date=t.transaction_date,

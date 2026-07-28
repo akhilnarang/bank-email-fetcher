@@ -46,6 +46,7 @@ from decimal import Decimal
 from typing import NamedTuple
 
 from scripts.synth import constants as C
+from scripts.synth.accounting import first_posting_sign
 from scripts.synth.models import Scenario, SynthTransaction
 
 MAX_LEDGER_ENTRIES = 500
@@ -190,16 +191,11 @@ def _project_entries(
 def _entry_from_transaction(t: SynthTransaction) -> LedgerEntry:
     """Sign postings so the entry balances to zero.
 
-    Debits (expenses, asset increases, liability decreases) are positive on the
-    named account; the counterpart takes the negation. Income is negative on
-    the Income account (credit-normal).
+    Scenario rows can name either the source account or the category account
+    first. The shared sign rule preserves source-side transaction polarity; the
+    counterpart takes the negation.
     """
-    debit = t.direction == C.DIRECTION_DEBIT
-    if t.ledger_account.startswith("Income"):
-        # Credit-normal: a credit (incoming) posts negative to Income.
-        signed = -t.amount if not debit else t.amount
-    else:
-        signed = t.amount if debit else -t.amount
+    signed = t.amount * first_posting_sign(t)
     postings = (
         LedgerPosting(account=t.ledger_account, amount=_q(signed)),
         LedgerPosting(account=t.ledger_counterpart, amount=_q(-signed)),

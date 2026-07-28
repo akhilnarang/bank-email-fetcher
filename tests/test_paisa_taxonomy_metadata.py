@@ -155,6 +155,7 @@ SEMANTICS_CASES = [
     ("salary", "credit", "asset", "Income:", KIND_INCOME),
     ("interest", "credit", "asset", "Income:", KIND_INCOME),
     ("other_income", "credit", "asset", "Income:", KIND_INCOME),
+    ("tax_refund", "credit", "asset", "Income:", KIND_INCOME),
     # Expense slugs → always Expenses root (even on credit = reversal)
     ("groceries", "debit", "asset", "Expenses:", KIND_EXPENSE),
     ("groceries", "credit", "asset", "Expenses:", KIND_EXPENSE),

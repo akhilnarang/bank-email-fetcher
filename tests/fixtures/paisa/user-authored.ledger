@@ -45,6 +45,7 @@ account Income:Other Income
 account Income:Refund
 account Income:Repayment
 account Income:Salary
+account Income:Tax Refund
 account Liabilities:Card:HDFCMillenniaCC
 
 = Expenses:Rent

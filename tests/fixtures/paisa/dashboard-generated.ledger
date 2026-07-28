@@ -42,6 +42,11 @@
     Assets:Bank:ICICISavings                        -3272.40 INR
     ; note: synthetic account_debit_car_maintenance
 
+2026-06-15 * GIFT SHOP    ; txn:2f67623f1eb9
+    Expenses:Gift                                   4677.22 INR
+    Assets:Bank:ICICISavings                        -4677.22 INR
+    ; note: synthetic account_debit_gift
+
 2026-06-15 * WINDOW MERCHANT    ; txn:dc55bda5fbc7
     Expenses:Shopping                               1234.00 INR
     Liabilities:Card:HDFCMillenniaCC                -1234.00 INR
@@ -87,15 +92,15 @@
     Assets:Bank:KotakSalary                         -3698.44 INR
     ; note: synthetic account_debit_expense
 
-2026-06-24 * GIVE CHARITY    ; txn:421d860edbcf
-    Expenses:Charity Gift                           4679.80 INR
-    Assets:Bank:HDFCSavings                         -4679.80 INR
-    ; note: synthetic account_debit_charity_gift
+2026-06-24 * INCOME TAX REFUND    ; txn:4bd0ef8f82b3
+    Income:Tax Refund                               -4679.80 INR
+    Assets:Bank:HDFCSavings                         4679.80 INR
+    ; note: synthetic account_credit_tax_refund
 
-2026-06-25 * GIFT SHOP    ; txn:3e7e5e74c8b3
-    Expenses:Gift                                   1990.12 INR
+2026-06-25 * GIVE CHARITY    ; txn:0216a48e1949
+    Expenses:Charity Gift                           1990.12 INR
     Assets:Bank:HDFCSavings                         -1990.12 INR
-    ; note: synthetic account_debit_gift
+    ; note: synthetic account_debit_charity_gift
 
 2026-06-26 * UNCATEGORIZED MERCHANT    ; txn:6eab70c9c1ec
     Expenses:Unknown                                77.00 INR
@@ -113,8 +118,8 @@
     ; note: synthetic account_credit_reversal
 
 2026-07-01 * EMPLOYER INC    ; txn:4180f3e5dead
-    Assets:Bank:HDFCSalary                          -154132.30 INR
-    Income:Salary                                   154132.30 INR
+    Assets:Bank:HDFCSalary                          154132.30 INR
+    Income:Salary                                   -154132.30 INR
     ; note: synthetic account_credit_salary
 
 2026-07-01 * COFFEE DAY    ; txn:b1f170cb7e21
@@ -143,8 +148,8 @@
     ; note: synthetic account_debit_upi
 
 2026-07-03 * BANK INTEREST    ; txn:273a3964e620
-    Assets:Bank:HDFCSavings                         -5588.33 INR
-    Income:Interest                                 5588.33 INR
+    Assets:Bank:HDFCSavings                         5588.33 INR
+    Income:Interest                                 -5588.33 INR
     ; note: synthetic account_credit_interest
 
 2026-07-03 * ZOMATO    ; txn:9891c40fd311
@@ -153,8 +158,8 @@
     ; note: synthetic account_debit_upi
 
 2026-07-03 * PAYMENT THANK YOU    ; txn:ad3d61e0ad42
-    Liabilities:Card:HDFCMillenniaCC                -7378.84 INR
-    Assets:Bank:HDFCSavings                         7378.84 INR
+    Liabilities:Card:HDFCMillenniaCC                7378.84 INR
+    Assets:Bank:HDFCSavings                         -7378.84 INR
     ; note: synthetic account_credit_card_payment
 
 2026-07-04 * LANDLORD    ; txn:9ffdf7921ea3
@@ -203,8 +208,8 @@
     ; note: synthetic account_debit_nach
 
 2026-07-10 * SELF    ; txn:18f46e780a17
-    Assets:Bank:HDFCSalary                          -14058.73 INR
-    Assets:Bank:HDFCSavings                         14058.73 INR
+    Assets:Bank:HDFCSalary                          14058.73 INR
+    Assets:Bank:HDFCSavings                         -14058.73 INR
     ; note: synthetic account_credit_transfer
 
 2026-07-10 * SELF    ; txn:974f285e6137
@@ -243,8 +248,8 @@
     ; note: synthetic account_debit_upi
 
 2026-07-15 * LOAN REPAYMENT    ; txn:4827ba4767a9
-    Assets:Bank:ICICISavings                        -25532.20 INR
-    Income:Repayment                                25532.20 INR
+    Assets:Bank:ICICISavings                        25532.20 INR
+    Income:Repayment                                -25532.20 INR
     ; note: synthetic account_credit_repayment
 
 2026-07-15 * BIGBASKET    ; txn:492beebdd3c9

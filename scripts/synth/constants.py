@@ -66,7 +66,12 @@ import uuid
 #: (the loader itself uses ``create_all``, which installs no triggers). The
 #: manifest's ``expected`` block gains ``extension_sync_state: 1``; the table
 #: is wiped on shape-upgrade reset so no stale lease/hash/revision survives.
-GENERATOR_VERSION = "1.4.0"
+#:
+#: 1.4.1 — taxonomy and ledger-polarity pass: add the ``tax_refund`` category
+#: from the production vocabulary; preserve source-side signs when synthetic
+#: rows put either the source or category account first; identify both-source
+#: transfer and card-payment rows from their transaction shape.
+GENERATOR_VERSION = "1.4.1"
 
 #: Bumped when the on-disk manifest JSON schema changes.
 SCHEMA_VERSION = "1"
@@ -207,6 +212,7 @@ SEED_CATEGORY_SLUGS: tuple[str, ...] = (
     "personal_care",
     "fees_charges",
     "tax",
+    "tax_refund",
     "cash_withdrawal",
     "charity_gift",
     "gift",
