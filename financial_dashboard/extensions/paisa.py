@@ -157,10 +157,10 @@ PAISA_SETTINGS = MappingProxyType(
             data_type="bool",
             category=PAISA_CATEGORY,
             label="Project Investments",
-            description="When on and in project mode, additionally emit complete "
-            "investment lots (from CAS data) as conservative cost-basis opening "
-            "posts. Default off; affects project mode only and never mutates "
-            "investment rows.",
+            description="When on and in project mode, project aggregate authoritative "
+            "CAS statement values. InvestmentLot rows are not consumed; cost basis, "
+            "gains, and XIRR are unavailable. Default off; affects project mode only "
+            "and never mutates investment rows.",
         ),
         "paisa.request_timeout_seconds": SettingDef(
             default="15",

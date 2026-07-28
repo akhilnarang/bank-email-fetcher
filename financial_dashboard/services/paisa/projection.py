@@ -38,6 +38,7 @@ from typing import NamedTuple
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from financial_dashboard.db.enums import SnapshotCategory
 from financial_dashboard.db.models import (
     Account,
     BalanceSnapshot,
@@ -46,7 +47,6 @@ from financial_dashboard.db.models import (
     ManualItem,
     Transaction,
 )
-from financial_dashboard.db.enums import SnapshotCategory
 from financial_dashboard.services.investments import (
     CurrentValuation,
     get_current_valuations,
@@ -65,9 +65,9 @@ from financial_dashboard.services.paisa.accounting import (
     KIND_SELF_TRANSFER,
     KIND_UNKNOWN,
     KIND_VALUATION,
-    ProjectionError,
     REPAYMENT_CLEARING_ACCOUNT,
     SELF_TRANSFER_SLUG,
+    ProjectionError,
     card_clearing_account,
     category_kind,
     contra_account,
@@ -75,14 +75,13 @@ from financial_dashboard.services.paisa.accounting import (
     resolve_account,
 )
 from financial_dashboard.services.paisa.config import PaisaProjectionConfig
-from financial_dashboard.services.settings import get_setting
-from financial_dashboard.services.paisa.renderers import (
-    render_document as render_document_for_backend,
-)
 from financial_dashboard.services.paisa.portfolio_identity import (
     PORTFOLIO_TOKEN_SECRET_KEY,
     normalize_portfolio_key,
     portfolio_token,
+)
+from financial_dashboard.services.paisa.renderers import (
+    render_document as render_document_for_backend,
 )
 from financial_dashboard.services.paisa.renderers.base import (
     EQUITY_REVALUATION,
@@ -96,6 +95,7 @@ from financial_dashboard.services.paisa.renderers.base import (
     investment_valuation_account,
     sanitize_meta_value,
 )
+from financial_dashboard.services.settings import get_setting
 
 # ---------------------------------------------------------------------------
 # Dashboard category → accounting taxonomy
@@ -1436,29 +1436,18 @@ async def project(
     #: them as "excluded" would imply value was omitted when it was not. The
     #: core investment service still exposes them on its own dashboard surface.
     investment_excluded: tuple[str, ...] = ()
-    #: Whether CAS aggregates are being projected at all. Gates both the
-    #: unresolved-leg policy and the valuation emission below.
-    portfolio_values: dict[str | None, _PortfolioValuation] = {}
-    uploads_with_snapshots: frozenset[int] = frozenset()
-    if config.project_investments:
-        # Loaded BEFORE the gate decision: an orphan BalanceSnapshot can exist
-        # without its CasUpload row (SQLite does not enforce the foreign key),
-        # and native net worth includes it. Gating on uploads alone would report
-        # CAS scope "none" and complete while omitting that native value.
-        portfolio_values, uploads_with_snapshots = await _load_portfolio_valuations(
-            session
-        )
-    cas_portfolios_projected = bool(
-        config.project_investments
-        and (scope_sources.cas_portfolio_keys or portfolio_values)
-    )
-    # Read once: the valuation account names derive a non-reversible portfolio
-    # token from it. Projection only READS the secret; the migration creates it.
+    # Load authoritative snapshot history exactly once, independently of the
+    # emission toggle. An orphan BalanceSnapshot can exist without its
+    # CasUpload row (SQLite does not enforce the foreign key), and native net
+    # worth includes it. Gating source discovery on uploads or on emission would
+    # report CAS scope "none" and complete while omitting that native source.
+    portfolio_values, uploads_with_snapshots = await _load_portfolio_valuations(session)
+    cas_sources_present = bool(scope_sources.cas_portfolio_keys or portfolio_values)
+    cas_portfolios_projected = config.project_investments and cas_sources_present
+    # The valuation account names derive a non-reversible portfolio token from
+    # this installation secret. Projection only READS it; the migration creates
+    # it. Raw portfolio identities never reach the journal.
     secret = get_setting(PORTFOLIO_TOKEN_SECRET_KEY)
-    if cas_portfolios_projected:
-        portfolio_values, uploads_with_snapshots = await _load_portfolio_valuations(
-            session
-        )
 
     # Linear pass over the remaining (eligible, non-self-transfer) txns.
     for txn in eligible:
@@ -1552,7 +1541,7 @@ async def project(
             if (
                 category in INVESTMENT_CATEGORY_SLUGS
                 and not explicit_mapping
-                and cas_portfolios_projected
+                and config.project_investments
             ):
                 if txn.direction == "debit":
                     # A purchase: the money really did move into investments, so
@@ -1729,7 +1718,7 @@ async def project(
         kind_counts[e.kind] = kind_counts.get(e.kind, 0) + 1
 
     represented = set(valuation_portfolios)
-    if not scope_sources.cas_portfolio_keys and not valuation_portfolios:
+    if not cas_sources_present:
         # No CAS source at all — neither an upload nor an orphan snapshot.
         cas_investment_scope = "none"
         cas_investment_coverage = "none"

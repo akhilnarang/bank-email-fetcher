@@ -565,6 +565,43 @@ async def test_purchase_keeps_its_unallocated_asset_and_is_reported(session):
     assert report.net_worth_scope_complete is False
 
 
+async def test_enabled_purchase_without_cas_stays_unallocated_and_inexact(session):
+    """The unresolved-leg policy is feature-driven, not CAS-source-driven."""
+    await _bank_and_snapshot(session)
+    await _investment_txn(session, amount="25000.00", on=datetime.date(2026, 2, 10))
+
+    report = await project(session, _config())
+
+    totals = _totals(report)
+    assert totals["Assets:Investments:Unallocated"] == Decimal("25000.00")
+    assert "Equity:Transfers In" not in totals
+    assert report.cas_investment_scope == "none"
+    assert report.investment_unresolved_purchases == 1
+    assert report.investment_unresolved_redemptions == 0
+    assert report.net_worth_sources_complete is True
+    assert report.net_worth_scope_complete is False
+
+
+async def test_enabled_redemption_without_cas_uses_clearing_not_negative_asset(
+    session,
+):
+    await _bank_and_snapshot(session)
+    await _investment_txn(
+        session, amount="40000.00", on=datetime.date(2026, 3, 5), direction="credit"
+    )
+
+    report = await project(session, _config())
+
+    totals = _totals(report)
+    assert totals["Equity:Transfers In"] == Decimal("-40000.00")
+    assert not any(account.startswith("Assets:Investments") for account in totals)
+    assert report.cas_investment_scope == "none"
+    assert report.investment_unresolved_purchases == 0
+    assert report.investment_unresolved_redemptions == 1
+    assert report.net_worth_sources_complete is True
+    assert report.net_worth_scope_complete is False
+
+
 async def test_redemption_never_drives_an_asset_negative(session):
     await _bank_and_snapshot(session)
     await _investment_txn(session, amount="10000.00", on=datetime.date(2026, 2, 10))
@@ -686,6 +723,25 @@ async def test_explicit_mapping_wins_for_redemption(session):
     assert report.investment_unresolved_redemptions == 0
 
 
+async def test_explicit_mapping_without_cas_still_wins_over_unresolved_policy(session):
+    await _bank_and_snapshot(session)
+    await _investment_txn(
+        session, amount="5000.00", on=datetime.date(2026, 4, 5), direction="credit"
+    )
+
+    report = await project(
+        session,
+        _config(
+            category_mappings={"investment_redemption": "Assets:Investments:MyBroker"}
+        ),
+    )
+
+    totals = _totals(report)
+    assert totals["Assets:Investments:MyBroker"] == Decimal("-5000.00")
+    assert "Equity:Transfers In" not in totals
+    assert report.investment_unresolved_redemptions == 0
+
+
 async def test_explicit_mapping_wins_for_purchase(session):
     await _bank_and_snapshot(session)
     await _persist_cas(
@@ -739,8 +795,38 @@ async def test_gate_off_leaves_investment_taxonomy_untouched(session):
     report = await project(session, _config(project_investments=False))
 
     totals = _totals(report)
-    assert "Assets:Investments:Unallocated" in totals
+    assert totals["Assets:Investments:Unallocated"] == Decimal("-100.00")
+    assert "Equity:Transfers In" not in totals
+    assert report.investment_unresolved_purchases == 0
     assert report.investment_unresolved_redemptions == 0
+    assert report.net_worth_scope_complete is True
+
+
+async def test_valuation_history_loader_runs_once_when_enabled(session, monkeypatch):
+    from financial_dashboard.services.paisa import projection as projection_module
+
+    await _bank_and_snapshot(session)
+    await _persist_cas(
+        session,
+        payload=_demat_payload(holdings=[_holding()]),
+        statement_date=datetime.date(2026, 3, 31),
+        grand_total="25000.00",
+    )
+    original = projection_module._load_portfolio_valuations
+    calls = 0
+
+    async def tracked_loader(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(projection_module, "_load_portfolio_valuations", tracked_loader)
+
+    report = await project(session, _config())
+
+    assert calls == 1
+    assert report.cas_investment_scope == "included"
+    assert report.investment_valuation_total == Decimal("25000.00")
 
 
 async def test_journal_never_contains_the_raw_portfolio_key(session):
@@ -1750,6 +1836,29 @@ async def test_orphan_snapshot_activates_projection(session):
     assert report.cas_investment_scope == "included"
     assert report.investment_valuation_portfolios == ("PAN-ORPHAN",)
     # Neither the missing upload id nor the raw key reaches the journal.
+    assert "PAN-ORPHAN" not in report.journal
+    assert "9999" not in report.journal
+
+
+async def test_orphan_snapshot_is_excluded_when_projection_is_disabled(session):
+    await _bank_and_snapshot(session)
+    await _snapshot_row(
+        session,
+        upload_id=9999,
+        key="PAN-ORPHAN",
+        date=datetime.date(2026, 3, 31),
+        total="8000.00",
+    )
+
+    report = await project(session, _config(project_investments=False))
+
+    assert report.cas_investment_scope == "excluded"
+    assert report.cas_investment_coverage == "excluded"
+    assert report.net_worth_sources_complete is False
+    assert report.net_worth_scope_complete is False
+    assert report.investment_valuation_entry_count == 0
+    assert report.investment_valuation_portfolios == ()
+    assert INVESTMENT_VALUATION_ROOT not in report.journal
     assert "PAN-ORPHAN" not in report.journal
     assert "9999" not in report.journal
 
