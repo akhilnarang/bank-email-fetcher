@@ -1096,7 +1096,7 @@ async def test_bank_same_ref_contention_is_held_back(
             # Neither statement-order winner is safe, so both are held back.
             h.bank_txn(
                 date="03/07/2026",
-                amount="700.00",
+                amount="500.00",
                 reference_number="DUPREF",
                 narration="dup",
             ),

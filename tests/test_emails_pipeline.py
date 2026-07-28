@@ -45,6 +45,7 @@ from financial_dashboard.db import (
     FetchRule,
     Transaction,
 )
+from financial_dashboard.integrations.email.body import RawEmailResult
 from financial_dashboard.services.emails import (
     EmailDispatchResult,
     ProcessedEmailParse,
@@ -464,7 +465,11 @@ async def test_reparse_multiple_transactions_returns_409(session_maker, monkeypa
         "financial_dashboard.web.emails.parse_email_by_kind",
         AsyncMock(
             return_value=EmailDispatchResult(
-                error=None, txn_data=txn_data, password_hint=None, stmt_result=None
+                error=None,
+                txn_data=txn_data,
+                password_hint=None,
+                stmt_result=None,
+                recognized_non_transaction=False,
             )
         ),
     )
@@ -472,7 +477,7 @@ async def test_reparse_multiple_transactions_returns_409(session_maker, monkeypa
     with (
         patch(
             "financial_dashboard.web.emails.load_or_fetch_raw_email",
-            new=AsyncMock(return_value=(_raw_email(), None)),
+            new=AsyncMock(return_value=RawEmailResult(_raw_email(), None, "provider")),
         ),
         patch(
             "financial_dashboard.web.emails.should_notify_transactions",

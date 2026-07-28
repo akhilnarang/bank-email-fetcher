@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from financial_dashboard.core.deps import get_session
 from financial_dashboard.core.templating import get_templates
-from financial_dashboard.db import SmsMessage, Transaction, async_session
+from financial_dashboard.db import SmsMessage, Transaction
 from financial_dashboard.exceptions import (
     InternalServerException,
     NotFoundException,

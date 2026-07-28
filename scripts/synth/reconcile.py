@@ -33,6 +33,9 @@ class _DbTxn(NamedTuple):
     counterparty: str | None
     reference_number: str | None
     card_mask: str | None
+    channel: str | None
+    balance: Decimal | None
+    raw_description: str | None
 
 
 def _db_standins(scenario_txns: Sequence, *, account_pk: int) -> list[_DbTxn]:
@@ -51,6 +54,9 @@ def _db_standins(scenario_txns: Sequence, *, account_pk: int) -> list[_DbTxn]:
                 counterparty=t.counterparty,
                 reference_number=t.reference_number,
                 card_mask=t.card_mask,
+                channel=t.channel,
+                balance=t.balance,
+                raw_description=t.raw_description,
             )
         )
     return out
