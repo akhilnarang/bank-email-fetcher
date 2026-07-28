@@ -45,6 +45,7 @@ def _stmt(
     total: str,
     due_date: str = "20/05/2026",
     status: PaymentStatus | None = PaymentStatus.UNPAID,
+    paid: Decimal | None = None,
 ) -> StatementUpload:
     return StatementUpload(
         account_id=account_id,
@@ -55,6 +56,7 @@ def _stmt(
         due_date=due_date,
         total_amount_due=total,
         payment_status=status,
+        payment_paid_amount=paid,
     )
 
 
@@ -481,3 +483,217 @@ async def test_resolver_returns_prompt_payload_when_no_amount_match(session):
     assert out["amount"] == Decimal("133")
     assert set(out["candidate_account_ids"]) == {a, b, c}
     assert set(out["candidate_labels"].keys()) == {a, b, c}
+
+
+# ---------- resolve: outstanding-match fallback ----------
+
+
+@pytest.mark.anyio
+async def test_resolver_outstanding_match(session):
+    """Payment matches total_due - paid on exactly one card."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="8,347.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("1347")),
+            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
+                  paid=Decimal("512")),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
+                  paid=Decimal("0")),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("7000"))
+    out = await resolve_cc_payment_account(session, t)
+    assert out is None
+    assert t.account_id == a
+
+
+@pytest.mark.anyio
+async def test_resolver_outstanding_match_ambiguous_falls_through(session):
+    """Two cards share the same outstanding amount. Exact-match on
+    total_due resolves first when one card's total matches."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="1,200.00", status=PaymentStatus.UNPAID),
+            _stmt(account_id=b, total="1,700.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("500")),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("1200"))
+    out = await resolve_cc_payment_account(session, t)
+    assert out is None
+    assert t.account_id == a
+
+
+@pytest.mark.anyio
+async def test_resolver_outstanding_match_both_outstanding_same(session):
+    """Two cards have identical outstanding and neither matches total_due
+    exactly. The resolver must fall through to the prompt."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="2,300.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("600")),
+            _stmt(account_id=b, total="3,400.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("1700")),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("1700"))
+    out = await resolve_cc_payment_account(session, t)
+    assert t.account_id is None
+    assert out is not None
+
+
+# ---------- resolve: sole-outstanding fallback ----------
+
+
+@pytest.mark.anyio
+async def test_resolver_sole_outstanding(session):
+    """Only one card has remaining balance > 0. Payment is less than
+    that balance."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="8,347.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("1347")),
+            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
+                  paid=Decimal("512")),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
+                  paid=Decimal("0")),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("4000"))
+    out = await resolve_cc_payment_account(session, t)
+    assert out is None
+    assert t.account_id == a
+
+
+@pytest.mark.anyio
+async def test_resolver_sole_outstanding_rejects_overpayment(session):
+    """Payment is more than the sole outstanding balance. The resolver
+    must fall through to the prompt."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="6,200.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("2200")),
+            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
+                  paid=Decimal("512")),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
+                  paid=Decimal("0")),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("5000"))
+    out = await resolve_cc_payment_account(session, t)
+    assert t.account_id is None
+    assert out is not None
+
+
+@pytest.mark.anyio
+async def test_resolver_sole_outstanding_skips_untracked(session):
+    """An untracked candidate (payment_status=None) blocks the
+    sole-outstanding tier. The resolver must fall through to the prompt."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="6,200.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("2200")),
+            _stmt(account_id=b, total="819.00", status=None),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
+                  paid=Decimal("0")),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("2500"))
+    out = await resolve_cc_payment_account(session, t)
+    assert t.account_id is None
+    assert out is not None
+
+
+@pytest.mark.anyio
+async def test_resolver_multiple_outstanding_prompts(session):
+    """Two cards with outstanding > 0, different amounts. Payment does
+    not match either outstanding. The resolver must fall through to the
+    prompt."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="5,700.00", status=PaymentStatus.UNPAID),
+            _stmt(account_id=b, total="3,100.00", status=PaymentStatus.UNPAID),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
+                  paid=Decimal("0")),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("2200"))
+    out = await resolve_cc_payment_account(session, t)
+    assert t.account_id is None
+    assert out is not None
+
+
+@pytest.mark.anyio
+async def test_resolver_zero_amount_skips(session):
+    """A zero-amount credit short-circuits before any DB read."""
+    await _seed_three_indusind_ccs(session)
+    t = Transaction(
+        bank="indusind",
+        email_type="indusind_cc_payment_alert",
+        direction="credit",
+        amount=Decimal("0"),
+        currency="INR",
+    )
+    out = await resolve_cc_payment_account(session, t)
+    assert out is None
+    assert t.account_id is None
+
+
+# ---------- resolve: missing-statement guard ----------
+
+
+@pytest.mark.anyio
+async def test_resolver_outstanding_skips_when_candidate_has_no_statement(session):
+    """A candidate with no statement makes outstanding-based tiers
+    unreliable. The resolver must fall through to the prompt."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="9,400.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("4400")),
+            _stmt(account_id=b, total="512.00", status=PaymentStatus.PAID,
+                  paid=Decimal("512")),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("5000"))
+    out = await resolve_cc_payment_account(session, t)
+    assert t.account_id is None
+    assert out is not None
+
+
+@pytest.mark.anyio
+async def test_resolver_outstanding_match_skips_when_untracked(session):
+    """The outstanding-match tier also refuses when any card is
+    untracked, not only the sole-outstanding tier."""
+    a, b, c = await _seed_three_indusind_ccs(session)
+    session.add_all(
+        [
+            _stmt(account_id=a, total="8,347.00", status=PaymentStatus.PARTIALLY_PAID,
+                  paid=Decimal("1347")),
+            _stmt(account_id=b, total="819.00", status=None),
+            _stmt(account_id=c, total="0.00", status=PaymentStatus.PAID,
+                  paid=Decimal("0")),
+        ]
+    )
+    await session.flush()
+    t = await _txn(session, amount=Decimal("7000"))
+    out = await resolve_cc_payment_account(session, t)
+    assert t.account_id is None
+    assert out is not None

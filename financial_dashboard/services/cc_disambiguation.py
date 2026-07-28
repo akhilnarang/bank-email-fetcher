@@ -18,10 +18,11 @@ Public API:
     2. Look up CC candidate accounts for the bank — ONE query.
     3. 0 candidates: silent no-op.
     4. 1 candidate: auto-resolve account_id on the row, flush.
-    5. >1 candidates: try amount vs open statement total_amount_due
-       (find_cc_account_by_total_due). On a unique hit, auto-resolve.
-       Otherwise, return the Telegram prompt payload for the caller to
-       dispatch post-commit.
+    5. >1 candidates, cascading resolution:
+       a. Exact match: amount == total_amount_due on latest statement.
+       b. Outstanding match: amount == total_amount_due - payment_paid_amount.
+       c. Sole outstanding: only one card has remaining balance > 0.
+       d. All fail → Telegram disambiguation prompt.
 
 - ``find_cc_account_by_total_due(session, bank, amount, *, candidate_ids=...)``
   remains exposed for tests and for callers that need the lower-level
@@ -119,6 +120,49 @@ async def _load_cc_candidates(
     return [_CandidateAccount(id=r[0], label=r[1]) for r in rows]
 
 
+async def _latest_statements(
+    session: AsyncSession, candidate_ids: list[int]
+) -> list[StatementUpload]:
+    """Get the latest statement (by due_date) per candidate account.
+    Does not filter on payment_status."""
+    from financial_dashboard.services.reminders import latest_per_account
+
+    uploads = (
+        (
+            await session.execute(
+                select(StatementUpload).where(
+                    StatementUpload.account_id.in_(candidate_ids),
+                    StatementUpload.due_date.isnot(None),
+                    StatementUpload.total_amount_due.isnot(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return latest_per_account(list(uploads))
+
+
+def _parse_outstanding(upload: StatementUpload) -> Decimal | None:
+    """Calculate remaining balance: total_amount_due minus payment_paid_amount.
+    Return None if the total is not parseable."""
+    from financial_dashboard.services.statements.cc import parse_cc_amount
+
+    if upload.total_amount_due is None:
+        return None
+    try:
+        due = parse_cc_amount(upload.total_amount_due)
+    except ValueError, InvalidOperation:
+        logger.warning(
+            "Skipping statement %s: total_amount_due=%r is not parseable.",
+            upload.id,
+            upload.total_amount_due,
+        )
+        return None
+    paid = upload.payment_paid_amount or Decimal(0)
+    return due - paid
+
+
 async def find_cc_account_by_total_due(
     session: AsyncSession,
     bank: str,
@@ -127,12 +171,12 @@ async def find_cc_account_by_total_due(
     candidate_ids: list[int] | None = None,
 ) -> int | None:
     """Resolve a maskless CC payment to a single account by matching
-    ``amount`` against an open statement's ``total_amount_due``.
+    ``amount`` against an active statement's ``total_amount_due``.
 
     Returns the account_id when exactly one candidate CC account in
-    ``bank`` has an active statement whose total matches ``amount``
-    exactly. Returns ``None`` on zero or multiple hits (caller falls
-    back to the Telegram disambiguation prompt).
+    ``bank`` has an active (unpaid/partially-paid/late) statement whose
+    total matches ``amount`` exactly. Returns ``None`` on zero or
+    multiple hits (caller falls back to outstanding-based fallbacks).
 
     ``candidate_ids`` may be passed when the caller has already loaded
     the CC candidate set (avoids a redundant DB query).
@@ -146,8 +190,6 @@ async def find_cc_account_by_total_due(
     if candidate_ids is None:
         candidate_ids = [c.id for c in await _load_cc_candidates(session, bank)]
     if len(candidate_ids) < 2:
-        # 0: nothing to disambiguate. 1: linker's bank-only fallback
-        # already handles this case.
         return None
 
     uploads = (
@@ -164,25 +206,18 @@ async def find_cc_account_by_total_due(
         .scalars()
         .all()
     )
-    # Mirror check_payment_received: only the most recent cycle per
-    # account is eligible — older unpaid balances roll into the new
-    # statement.
+    # Only the most recent cycle per account is eligible: older unpaid
+    # balances roll into the new statement.
     latest = latest_per_account(list(uploads))
 
     target = Decimal(str(amount))
     matches: list[int] = []
     for upload in latest:
         if upload.total_amount_due is None:
-            # Defense in depth — the SQL also filters NOT NULL, but
-            # narrowing here keeps the parse call typed cleanly and
-            # protects against schema-level relaxations later.
             continue
         try:
             due = parse_cc_amount(upload.total_amount_due)
         except ValueError, InvalidOperation:
-            # An unparseable total_amount_due in a row that passed the
-            # NOT NULL filter is a data-quality issue, not a routine
-            # condition — log it so a silent skip is debuggable.
             logger.warning(
                 "Skipping statement %s during amount-based disambiguation: "
                 "total_amount_due=%r is not parseable.",
@@ -254,7 +289,7 @@ async def resolve_cc_payment_account(
     # Schema marks Transaction.amount NOT NULL, but a parser bug could
     # in principle deliver a None — guard so a downstream Decimal(str(None))
     # doesn't blow up. Defense in depth, not a routine condition.
-    if txn_row.amount is None:
+    if txn_row.amount is None or txn_row.amount <= 0:
         return None
 
     candidates = await _load_cc_candidates(session, txn_row.bank)
@@ -266,14 +301,66 @@ async def resolve_cc_payment_account(
         await session.flush()
         return None
 
+    candidate_ids = [c.id for c in candidates]
     amount_match = await find_cc_account_by_total_due(
         session,
         txn_row.bank,
         txn_row.amount,
-        candidate_ids=[c.id for c in candidates],
+        candidate_ids=candidate_ids,
     )
     if amount_match is not None:
         txn_row.account_id = amount_match
+        await session.flush()
+        return None
+
+    target = Decimal(str(txn_row.amount))
+    latest = await _latest_statements(session, candidate_ids)
+
+    # All candidates must have a latest statement. If any card has none,
+    # outstanding-based tiers cannot operate safely.
+    covered_ids = {u.account_id for u in latest}
+    if covered_ids != set(candidate_ids):
+        return _build_payload_from_candidates(
+            candidates, txn_id=txn_row.id, bank=txn_row.bank, amount=txn_row.amount
+        )
+
+    outstanding_matches: list[int] = []
+    accounts_with_outstanding: list[int] = []
+    has_untracked = False
+    for upload in latest:
+        if upload.payment_status is None:
+            has_untracked = True
+            continue
+        remaining = _parse_outstanding(upload)
+        if remaining is None:
+            has_untracked = True
+            continue
+        if remaining > 0:
+            accounts_with_outstanding.append(upload.account_id)
+        if remaining == target:
+            outstanding_matches.append(upload.account_id)
+
+    if not has_untracked and len(outstanding_matches) == 1:
+        logger.info(
+            "CC disambiguation: outstanding-match for bank=%r amount=%s → account %d",
+            txn_row.bank, target, outstanding_matches[0],
+        )
+        txn_row.account_id = outstanding_matches[0]
+        await session.flush()
+        return None
+
+    if (
+        not has_untracked
+        and len(accounts_with_outstanding) == 1
+        and target <= _parse_outstanding(
+            next(u for u in latest if u.account_id == accounts_with_outstanding[0])
+        )
+    ):
+        logger.info(
+            "CC disambiguation: sole-outstanding for bank=%r amount=%s → account %d",
+            txn_row.bank, target, accounts_with_outstanding[0],
+        )
+        txn_row.account_id = accounts_with_outstanding[0]
         await session.flush()
         return None
 
