@@ -44,6 +44,7 @@ SEED_CATEGORIES: list[str] = [
     "personal_care",
     "fees_charges",
     "tax",
+    "tax_refund",
     "cash_withdrawal",
     "charity_gift",
     "gift",

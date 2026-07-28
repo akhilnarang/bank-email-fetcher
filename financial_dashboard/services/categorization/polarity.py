@@ -46,6 +46,7 @@ INCOME_SLUGS: frozenset = frozenset(
         "other_income",
         "repayment",
         "investment_redemption",
+        "tax_refund",
     }
 )
 
