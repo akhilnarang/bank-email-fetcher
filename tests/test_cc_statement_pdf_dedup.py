@@ -1,0 +1,248 @@
+"""Tests for the (account_id, due_date) dedup guard in
+``process_statement_email`` — a re-sent CC statement PDF for a due-date we
+already have an upload row for must return the existing row and skip
+reconcile / PDF write / import.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from financial_dashboard.db import (
+    Account,
+    Base,
+    Card,
+    StatementUpload,
+)
+from financial_dashboard.services.statements import cc as cc_module
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture
+async def session_factory(monkeypatch, tmp_path):
+    db_path = tmp_path / "pdf-dedup-test.sqlite"
+    sync_engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(sync_engine)
+    sync_engine.dispose()
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(cc_module, "async_session", maker)
+    yield maker
+    await engine.dispose()
+
+
+async def _add_cc_account(
+    maker,
+    *,
+    bank: str = "jupiter",
+    label: str = "Jupiter",
+    account_number: str | None = None,
+    active: bool = True,
+    card_last4: str | None = "1234",
+) -> int:
+    async with maker() as session:
+        acc = Account(
+            bank=bank,
+            label=label,
+            type="credit_card",
+            account_number=account_number,
+            active=active,
+        )
+        session.add(acc)
+        await session.flush()
+        if card_last4:
+            session.add(Card(account_id=acc.id, card_mask=card_last4, is_primary=True))
+        await session.commit()
+        return acc.id
+
+
+def _install_common_monkeypatches(monkeypatch, tmp_path, due_date, import_calls):
+    monkeypatch.setattr(
+        cc_module,
+        "extract_pdf_from_email",
+        lambda raw_bytes: [("stmt.pdf", b"%PDF-fake")],
+    )
+    monkeypatch.setattr(cc_module, "extract_password_hint", lambda *a, **k: None)
+
+    def _fake_parse(pdf_bytes, password, bank):
+        return SimpleNamespace(
+            bank="jupiter",
+            name=None,
+            card_number="1234",
+            due_date=due_date,
+            statement_total_amount_due="1,234.56",
+            transactions=[],
+        )
+
+    monkeypatch.setattr(cc_module, "_parse_pdf_bytes_sync", _fake_parse)
+
+    async def _record_import(session, upload, parsed, account, recon):
+        import_calls.append((upload.id, account.id))
+        return []
+
+    monkeypatch.setattr(cc_module, "import_missing_cc_txns", _record_import)
+
+    monkeypatch.setattr(
+        cc_module,
+        "reconcile_statement",
+        lambda parsed, db_txns, account_id, card_masks: {
+            "matched": [],
+            "missing": [],
+        },
+    )
+
+    statements_dir = tmp_path / "statements"
+    monkeypatch.setattr(cc_module, "STATEMENTS_DIR", statements_dir)
+
+    async def _noop_snapshot(session, upload):
+        return None
+
+    monkeypatch.setattr(cc_module, "emit_cc_snapshot", _noop_snapshot)
+    monkeypatch.setattr(cc_module, "should_notify_transactions", lambda: False)
+
+    async def _noop_enrich(recon):
+        return 0
+
+    monkeypatch.setattr(cc_module, "enrich_matched_transactions", _noop_enrich)
+
+    import financial_dashboard.services.reminders as reminders_mod
+
+    async def _noop_init(_uid):
+        return True
+
+    monkeypatch.setattr(reminders_mod, "init_payment_tracking", _noop_init)
+
+    return statements_dir
+
+
+@pytest.mark.anyio
+async def test_pdf_dedups_against_prior_pdf_upload(
+    session_factory, monkeypatch, tmp_path
+):
+    acc_id = await _add_cc_account(session_factory)
+    async with session_factory() as session:
+        existing = StatementUpload(
+            account_id=acc_id,
+            bank="jupiter",
+            filename="x",
+            file_path="x",
+            source_kind="pdf",
+            status="parsed",
+            due_date="05/05/2026",
+            payment_status="pending",
+        )
+        session.add(existing)
+        await session.commit()
+        existing_id = existing.id
+
+    import_calls: list = []
+    statements_dir = _install_common_monkeypatches(
+        monkeypatch, tmp_path, "05/05/2026", import_calls
+    )
+
+    result = await cc_module.process_statement_email(
+        "jupiter", b"raw", "Your Jupiter Card Statement"
+    )
+
+    assert result is not None
+    assert result["statement_upload_id"] == existing_id
+    assert result["deduped"] is True
+    assert result["matched"] == 0
+    assert result["missing"] == 0
+    assert result["imported"] == 0
+
+    assert import_calls == []
+    assert not statements_dir.exists() or not any(statements_dir.iterdir())
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(StatementUpload))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].id == existing_id
+        assert rows[0].payment_status == "pending"
+
+
+@pytest.mark.anyio
+async def test_pdf_dedups_against_email_summary_upload(
+    session_factory, monkeypatch, tmp_path
+):
+    acc_id = await _add_cc_account(session_factory)
+    async with session_factory() as session:
+        existing = StatementUpload(
+            account_id=acc_id,
+            bank="jupiter",
+            filename="",
+            file_path="",
+            source_kind="email_summary",
+            status="parsed",
+            due_date="05/05/2026",
+            payment_status="pending",
+        )
+        session.add(existing)
+        await session.commit()
+        existing_id = existing.id
+
+    import_calls: list = []
+    statements_dir = _install_common_monkeypatches(
+        monkeypatch, tmp_path, "05/05/2026", import_calls
+    )
+
+    result = await cc_module.process_statement_email(
+        "jupiter", b"raw", "Your Jupiter Card Statement"
+    )
+
+    assert result is not None
+    assert result["statement_upload_id"] == existing_id
+    assert result["deduped"] is True
+    assert result["matched"] == 0
+    assert result["missing"] == 0
+    assert result["imported"] == 0
+
+    assert import_calls == []
+    assert not statements_dir.exists() or not any(statements_dir.iterdir())
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(StatementUpload))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].id == existing_id
+        assert rows[0].payment_status == "pending"
+
+
+@pytest.mark.anyio
+async def test_no_dedup_when_parsed_due_date_missing(
+    session_factory, monkeypatch, tmp_path
+):
+    acc_id = await _add_cc_account(session_factory)
+    async with session_factory() as session:
+        existing = StatementUpload(
+            account_id=acc_id,
+            bank="jupiter",
+            filename="x",
+            file_path="x",
+            source_kind="pdf",
+            status="parsed",
+            due_date=None,
+            payment_status="pending",
+        )
+        session.add(existing)
+        await session.commit()
+
+    import_calls: list = []
+    _install_common_monkeypatches(monkeypatch, tmp_path, None, import_calls)
+
+    result = await cc_module.process_statement_email(
+        "jupiter", b"raw", "Your Jupiter Card Statement"
+    )
+
+    assert result is not None
+    assert "deduped" not in result
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(StatementUpload))).scalars().all()
+        assert len(rows) == 2

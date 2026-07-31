@@ -1400,6 +1400,37 @@ async def process_statement_email(
     if account is None:
         return None
 
+    if parsed.due_date is not None:
+        async with async_session() as session:
+            existing = (
+                (
+                    await session.execute(
+                        select(StatementUpload).where(
+                            StatementUpload.account_id == account.id,
+                            StatementUpload.due_date == parsed.due_date,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if existing is not None:
+            logger.info(
+                "duplicate CC statement email ignored: existing upload id=%s "
+                "source_id=%s account_id=%s due_date=%s",
+                existing.id,
+                source_id,
+                account.id,
+                parsed.due_date,
+            )
+            return {
+                "statement_upload_id": existing.id,
+                "matched": 0,
+                "missing": 0,
+                "imported": 0,
+                "deduped": True,
+            }
+
     # Reconcile
     async with async_session() as session:
         db_txns = (
