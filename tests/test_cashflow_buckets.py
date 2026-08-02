@@ -16,8 +16,10 @@ from financial_dashboard.services.categorization.polarity import (
 from financial_dashboard.services.categorization.vocabulary import SEED_CATEGORIES
 
 
-def test_income_bucket_is_earnings_only():
-    assert INCOME_BUCKET == frozenset({"salary", "interest", "other_income"})
+def test_income_bucket_contains_only_income_categories():
+    assert INCOME_BUCKET == frozenset(
+        {"salary", "interest", "other_income", "tax_refund"}
+    )
 
 
 def test_repayment_is_transfers_in_not_income():

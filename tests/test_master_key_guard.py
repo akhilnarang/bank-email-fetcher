@@ -16,7 +16,11 @@ import financial_dashboard.services.settings as settings_mod
 from financial_dashboard.config import Settings
 from financial_dashboard.db import EmailSource, Setting
 from financial_dashboard.db.models import Base
-from financial_dashboard.services.settings import assert_master_key_or_no_secrets
+from financial_dashboard.services.extensions import bootstrap_extensions
+from financial_dashboard.services.settings import (
+    SETTINGS_REGISTRY,
+    assert_master_key_or_no_secrets,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -68,6 +72,23 @@ async def test_secret_setting_without_key_raises(db_session, monkeypatch):
     await db_session.commit()
     with pytest.raises(SystemExit, match="EMAIL_SOURCE_MASTER_KEY"):
         await assert_master_key_or_no_secrets(db_session)
+
+
+async def test_dormant_paisa_secret_without_key_raises(db_session, monkeypatch):
+    monkeypatch.setattr(settings_mod, "settings", _settings())
+    original_registry = dict(SETTINGS_REGISTRY)
+    try:
+        bootstrap_extensions(session_factory=async_sessionmaker(), paisa_enabled=False)
+        assert "paisa.auth_password" not in SETTINGS_REGISTRY
+        db_session.add(
+            Setting(key="paisa.auth_password", value="encrypted-paisa-password")
+        )
+        await db_session.commit()
+        with pytest.raises(SystemExit, match="EMAIL_SOURCE_MASTER_KEY"):
+            await assert_master_key_or_no_secrets(db_session)
+    finally:
+        SETTINGS_REGISTRY.clear()
+        SETTINGS_REGISTRY.update(original_registry)
 
 
 async def test_non_secret_setting_without_key_does_not_raise(db_session, monkeypatch):
