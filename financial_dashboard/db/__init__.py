@@ -74,13 +74,15 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 # coordinator is registered the fire iterates an empty list — a no-op.
 @event.listens_for(_Session, "after_commit")
 def _signal_commit_wake(session) -> None:  # noqa: ANN001
+    if not settings.paisa_enabled:
+        return
     from financial_dashboard.services.paisa.wakeup import _fire_commit_wake
 
     _fire_commit_wake()
 
 
 async def init_db() -> None:
-    await _init_db(engine)
+    await _init_db(engine, paisa_enabled=settings.paisa_enabled)
 
 
 __all__ = [

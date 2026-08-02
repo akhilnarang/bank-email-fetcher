@@ -22,17 +22,33 @@ from financial_dashboard.services.settings import SETTINGS_REGISTRY, register_se
 BUILTIN_EXTENSIONS: tuple[ExtensionManifest, ...] = (PAISA_EXTENSION,)
 
 
-def register_builtin_extensions(registry: ExtensionRegistry) -> None:
-    """Register every builtin manifest into *registry* and its settings globally.
+def enabled_builtin_extensions(*, paisa_enabled: bool) -> tuple[ExtensionManifest, ...]:
+    """Return the builtin manifests enabled for this deployment."""
+    return BUILTIN_EXTENSIONS if paisa_enabled else ()
 
-    Idempotent across restarts within a single process: manifests register into
-    the (per-app) registry instance, while contributed settings are reconciled
-    against the process-wide SETTINGS_REGISTRY. A setting key that is already
-    present with an *equal* SettingDef is accepted; a key present with a
-    *different* definition raises ExtensionRegistrationError rather than
-    silently overwriting or skipping it.
+
+def register_builtin_extensions(
+    registry: ExtensionRegistry, *, paisa_enabled: bool = True
+) -> None:
+    """Register enabled builtin manifests and their settings globally.
+
+    Idempotent across app lifecycles within a single process: manifests register
+    into the per-app registry, while contributed settings are reconciled against
+    the process-wide SETTINGS_REGISTRY. Definitions belonging to a disabled
+    builtin are removed without touching persisted values. An equal existing
+    SettingDef is accepted; a different definition raises
+    ExtensionRegistrationError rather than being silently overwritten.
     """
+    enabled = enabled_builtin_extensions(paisa_enabled=paisa_enabled)
+    enabled_ids = {manifest.id for manifest in enabled}
     for manifest in BUILTIN_EXTENSIONS:
+        if manifest.id in enabled_ids:
+            continue
+        for key, defn in manifest.settings.items():
+            if SETTINGS_REGISTRY.get(key) == defn:
+                del SETTINGS_REGISTRY[key]
+
+    for manifest in enabled:
         registry.register(manifest)
         for key, defn in manifest.settings.items():
             existing = SETTINGS_REGISTRY.get(key)
@@ -57,5 +73,6 @@ __all__ = [
     "ExtensionRegistry",
     "ExtensionRuntime",
     "PAISA_EXTENSION",
+    "enabled_builtin_extensions",
     "register_builtin_extensions",
 ]

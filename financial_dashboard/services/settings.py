@@ -454,7 +454,18 @@ async def assert_master_key_or_no_secrets(session) -> None:
         )
     ).first() is not None
 
-    secret_keys = [key for key, defn in SETTINGS_REGISTRY.items() if defn.secret]
+    # Include dormant builtin-extension secrets even when a deployment gate has
+    # removed their definitions from the active registry. Their encrypted rows
+    # are intentionally preserved for a future re-enable and still require the
+    # same stable master key.
+    secret_keys = {key for key, defn in SETTINGS_REGISTRY.items() if defn.secret}
+    from financial_dashboard.extensions import BUILTIN_EXTENSIONS
+
+    for manifest in BUILTIN_EXTENSIONS:
+        secret_keys.update(
+            key for key, defn in manifest.settings.items() if defn.secret
+        )
+
     has_secret_setting = False
     if secret_keys:
         has_secret_setting = (

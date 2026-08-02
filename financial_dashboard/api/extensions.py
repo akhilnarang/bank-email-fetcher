@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from financial_dashboard.core.deps import get_session
-from financial_dashboard.extensions import BUILTIN_EXTENSIONS
+from financial_dashboard.extensions import enabled_builtin_extensions
 from financial_dashboard.schemas.extensions import (
     ExtensionAuditResponse,
     ExtensionErrorResponse,
@@ -37,7 +37,7 @@ from financial_dashboard.services.paisa import surface
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/extensions")
+framework_router = APIRouter(prefix="/extensions")
 
 
 def _manifests(request: Request):
@@ -51,10 +51,11 @@ def _manifests(request: Request):
     manager = getattr(request.app.state, "extension_manager", None)
     if manager is not None:
         return manager.all()
-    return BUILTIN_EXTENSIONS
+    paisa_enabled = getattr(request.app.state, "paisa_enabled", True)
+    return enabled_builtin_extensions(paisa_enabled=paisa_enabled)
 
 
-@router.get("", response_model=ExtensionListResponse)
+@framework_router.get("", response_model=ExtensionListResponse)
 async def list_extensions(request: Request) -> ExtensionListResponse:
     return ExtensionListResponse(
         extensions=[surface.extension_info(m) for m in _manifests(request)]
@@ -224,4 +225,16 @@ def _typed_error(code: str, detail: str) -> JSONResponse:
     return JSONResponse(body.model_dump(), status_code=200)
 
 
-router.include_router(paisa_router)
+def get_router(*, paisa_enabled: bool) -> APIRouter:
+    """Build the extension API surface enabled for this deployment."""
+    aggregate = APIRouter()
+    aggregate.include_router(framework_router)
+    if paisa_enabled:
+        paisa_parent = APIRouter(prefix="/extensions")
+        paisa_parent.include_router(paisa_router)
+        aggregate.include_router(paisa_parent)
+    return aggregate
+
+
+# Backwards-compatible full router for domain-level tests and direct imports.
+router = get_router(paisa_enabled=True)

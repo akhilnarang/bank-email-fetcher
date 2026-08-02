@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from financial_dashboard.api import router as api_router
+from financial_dashboard.api import get_router as get_api_router
 from financial_dashboard.config import settings
 from financial_dashboard.core.deps import verify_credentials
 from financial_dashboard.db import async_session, engine, init_db
@@ -32,7 +32,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Register builtin extensions before init_db() runs load_all_settings(), so
     # contributed SettingDef entries are present when the settings cache fills.
-    app.state.extension_manager = bootstrap_extensions(session_factory=async_session)
+    app.state.extension_manager = bootstrap_extensions(
+        session_factory=async_session,
+        paisa_enabled=settings.paisa_enabled,
+    )
 
     logger.info("Initializing database...")
     await init_db()
@@ -81,6 +84,7 @@ def create_app() -> FastAPI:
         StaticFiles(directory=Path(__file__).resolve().parent / "static"),
         name="static",
     )
-    app.include_router(api_router)
-    app.include_router(get_router())
+    app.state.paisa_enabled = settings.paisa_enabled
+    app.include_router(get_api_router(paisa_enabled=settings.paisa_enabled))
+    app.include_router(get_router(paisa_enabled=settings.paisa_enabled))
     return app

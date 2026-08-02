@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import financial_dashboard.services.paisa.coordinator as coord_mod
 import financial_dashboard.services.settings as settings_mod
+from financial_dashboard.config import settings as deployment_settings
 from financial_dashboard.db.init_db import init_db
 from financial_dashboard.db.models import Transaction
 from financial_dashboard.services.paisa.audit import (
@@ -132,7 +133,8 @@ def factory(db):
 
 @pytest.fixture
 def settings_paisa(monkeypatch):
-    """Project mode + auto on by default; tests override via the cache."""
+    """Project mode + deployment opt-in; tests override via the cache."""
+    monkeypatch.setattr(deployment_settings, "paisa_enabled", True)
     settings_mod._cache.update(
         {
             "paisa.mode": "project",

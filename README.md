@@ -36,6 +36,7 @@ Once running:
 |----------|---------|-------------|
 | `EMAIL_SOURCE_MASTER_KEY` | (required) | Fernet key for encrypting credentials at rest. If unset, an ephemeral key is generated on each startup (credentials will not survive restarts). |
 | `DB_URL` | `sqlite+aiosqlite:///./data/financial_dashboard.db` | SQLAlchemy database URL |
+| `PAISA_ENABLED` | `false` | Deployment-level opt-in for Paisa. When false, Paisa routes, settings, runtime polling, sync state, and dirty triggers are not installed. Requires restart. |
 | `POLL_INTERVAL_MINUTES` | `15` | Automatic background polling interval |
 | `POLL_FETCH_LIMIT_PER_RULE` | `50` | Max new emails fetched per rule per poll cycle |
 | `TELEGRAM_BOT_TOKEN` | (optional) | Telegram bot token for real-time transaction notifications |
@@ -105,7 +106,7 @@ Linking is performed inline during polling and in batch via the `relink_orphans(
 
 ## Extensions
 
-The dashboard ships a small **first-party extension framework**. Extensions are registered explicitly from `financial_dashboard/extensions/` — there is no plugin discovery, filesystem scan, or dynamic import. The only builtin today is **Paisa**, a ledger-data projection target ([ananthakumaran/paisa](https://github.com/ananthakumaran/paisa)).
+The dashboard ships a small **first-party extension framework**. Extensions are registered explicitly from `financial_dashboard/extensions/` — there is no plugin discovery, filesystem scan, or dynamic import. The only builtin today is **Paisa**, a ledger-data projection target ([ananthakumaran/paisa](https://github.com/ananthakumaran/paisa)). Paisa is deployment-level opt-in: set `PAISA_ENABLED=true` and restart to register it. With the default `false`, its routes, contributed settings, runtime/coordinator, sync-state row, and SQLite dirty triggers are absent; existing Paisa settings and audit history are preserved if an enabled deployment is later switched off.
 
 ### Architecture
 
@@ -119,7 +120,7 @@ Each manifest advertises capability tags. Paisa advertises `setting_contribution
 
 ### Paisa
 
-Paisa projection runs in one of three **modes** (`paisa.mode`), which **coexist** with the native dashboard — enabling Paisa never changes how transactions are ingested, linked, categorized, or snapshotted:
+After the deployment opts in with `PAISA_ENABLED=true`, Paisa projection runs in one of three **modes** (`paisa.mode`), which **coexist** with the native dashboard — enabling Paisa never changes how transactions are ingested, linked, categorized, or snapshotted:
 
 | Mode | What it does | Network |
 |------|--------------|---------|
@@ -191,7 +192,7 @@ When `paisa.auto_sync_enabled=true` and the mode is `project`, a coordinator kee
 - **Single-flight.** A lease on `extension_sync_state` (`lease_owner`/`lease_token`/`lease_expires_at`) ensures at most one coordinator reconciles at a time.
 - **Retry + force reload (fixed).** A failed remote reload backs off `1/2/5/10/15` minutes (`next_attempt_at`/`failure_count`); a `paisa.%` settings change resets the backoff so a config fix is retried immediately. A six-hour force reload (`force_reload`) periodically reconciles even with no observable drift, so a silent out-of-band Paisa change is corrected.
 - **Hard minimum interval (the only tunable knob).** `paisa.auto_sync_min_interval_minutes` (default **1**) is a hard floor between remote reloads/retries only — it is **not** the event debounce (5s) or the max latency (30s), both fixed. A value of 1 reloads as soon as the coordinator allows; a higher value throttles a healthy stream and a failing one alike. Existing persisted values are preserved across upgrades.
-- **disabled/connect.** The triggers still bump `desired_revision` in `disabled`/`connect`, so dirty state accumulates with no I/O — the coordinator performs no projection, file, or network work until `project` mode + auto-sync is on. The bump is cheap and nothing is lost.
+- **disabled/connect.** On a `PAISA_ENABLED=true` deployment, the triggers still bump `desired_revision` in `disabled`/`connect`, so dirty state accumulates with no I/O — the coordinator performs no projection, file, or network work until `project` mode + auto-sync is on. With `PAISA_ENABLED=false`, neither the coordinator nor these triggers/state rows are installed.
 - **Audited + failure-isolated.** Each reconcile records an `ExtensionRun` row; any exception is caught and swallowed so it can never break polling. When `paisa.notify_sync_failures=true`, repeated *identical* failures are deduped via a fingerprint in the audit `details` (`notify_fp`); a changed failure notifies again.
 
 #### Constraints & caveats

@@ -189,8 +189,10 @@ class ExtensionManager:
         )
 
 
-def bootstrap_extensions(*, session_factory: async_sessionmaker) -> ExtensionManager:
-    """Build a manager, register builtin manifests+settings, attach runtimes.
+def bootstrap_extensions(
+    *, session_factory: async_sessionmaker, paisa_enabled: bool = True
+) -> ExtensionManager:
+    """Build a manager, register enabled manifests+settings, and attach runtimes.
 
     Contributed settings land in the process-wide SETTINGS_REGISTRY (idempotent
     across restarts), so this must run before ``load_all_settings()``. Runtime
@@ -200,7 +202,7 @@ def bootstrap_extensions(*, session_factory: async_sessionmaker) -> ExtensionMan
     settings are not loaded yet.
     """
     manager = ExtensionManager()
-    register_builtin_extensions(manager.registry)
+    register_builtin_extensions(manager.registry, paisa_enabled=paisa_enabled)
     _register_builtin_runtimes(manager, session_factory=session_factory)
     return manager
 

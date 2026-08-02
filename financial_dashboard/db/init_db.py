@@ -21,6 +21,18 @@ _EXTENSION_SYNC_TRIGGER_TABLES = (
 )
 
 
+def _extension_sync_trigger_names() -> tuple[str, ...]:
+    table_triggers = tuple(
+        f"ext_sync_dirty_{table}_{verb}"
+        for table in _EXTENSION_SYNC_TRIGGER_TABLES
+        for verb in ("insert", "update", "delete")
+    )
+    settings_triggers = tuple(
+        f"ext_sync_dirty_settings_{verb}" for verb in ("insert", "update", "delete")
+    )
+    return table_triggers + settings_triggers
+
+
 def _extension_sync_bump_body(*, reset_backoff: bool) -> str:
     """SQL fragment that bumps desired_revision + manages dirty timestamps.
 
@@ -155,11 +167,18 @@ async def _backfill_legacy_investment_lots(conn) -> None:
         await session.commit()
 
 
-async def init_db(engine) -> None:
+async def init_db(engine, *, paisa_enabled: bool = True) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     async with engine.begin() as conn:
+        # Remove triggers from a prior enabled deployment before migrations or
+        # normal writes run. Enabled deployments reinstall them after all
+        # backfills; disabled deployments leave them absent.
+        if conn.dialect.name == "sqlite":
+            for trigger_name in _extension_sync_trigger_names():
+                await conn.execute(text(f"DROP TRIGGER IF EXISTS {trigger_name}"))
+
         # ``settings`` predates its ORM bookkeeping column on deployed
         # databases.  Upgrade it before any migration marker is read/written:
         # the CAS-lot backfill below uses a marker in this table, and startup's
@@ -703,59 +722,51 @@ async def init_db(engine) -> None:
         # and isolates malformed uploads; the marker makes later boots O(1).
         await _backfill_legacy_investment_lots(conn)
 
-        # --- Paisa portfolio-token secret -----------------------------------
-        # The valuation-only CAS fallback names an account per portfolio. A
-        # portfolio key is a PAN, so the account segment is a keyed HMAC under
-        # this per-installation secret rather than the key itself — someone
-        # holding only the generated journal cannot recover the PAN. Seeded
-        # here (once, idempotently) because projection is strictly read-only
-        # and must never create it; without a secret the projection degrades to
-        # a single shared valuation account instead of leaking the key.
-        from financial_dashboard.services.paisa.portfolio_identity import (
-            PORTFOLIO_TOKEN_SECRET_KEY,
-            new_portfolio_token_secret,
-        )
-
-        await conn.execute(
-            text(
-                "INSERT INTO settings (key, value, updated_at) "
-                "VALUES (:key, :value, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(key) DO NOTHING"
-            ),
-            {"key": PORTFOLIO_TOKEN_SECRET_KEY, "value": new_portfolio_token_secret()},
-        )
-
-        # --- Extension sync-state: Paisa singleton + dirty-revision triggers ---
-        # ``create_all`` builds extension_sync_state on fresh + legacy DBs (it
-        # only creates missing tables). Idempotently seed the Paisa singleton
-        # row dirty (desired_revision=1, applied_revision=0) and force_reload=1
-        # so the next enabled coordinator reconciles once, even with no
-        # observable drift yet. ON CONFLICT DO NOTHING leaves a coordinator-
-        # owned row authoritative — migration never overwrites a row a
-        # coordinator has already touched (so re-boot does not re-force a
-        # reconcile after the first one succeeded).
-        await conn.execute(
-            text(
-                "INSERT INTO extension_sync_state "
-                "(extension_id, desired_revision, applied_revision, "
-                " first_dirty_at, last_dirty_at, force_reload, failure_count, "
-                " created_at, updated_at) "
-                "VALUES ('paisa', 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, "
-                "        1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(extension_id) DO NOTHING"
+        if paisa_enabled:
+            # The optional projection uses a keyed token rather than exposing a
+            # portfolio PAN in generated journals. Seed it only for deployments
+            # that opted into Paisa; preserve an existing value when later off.
+            from financial_dashboard.services.paisa.portfolio_identity import (
+                PORTFOLIO_TOKEN_SECRET_KEY,
+                new_portfolio_token_secret,
             )
-        )
 
-        # Install the SQLite triggers LAST in this block, after every column
-        # ALTER and data backfill above has run un-tracked. That keeps the
-        # migration's own UPDATEs (e.g. category_method backfill) from firing
-        # them, so a legacy DB does not accumulate spurious bumps during its
-        # first migration pass — only writes after this point dirty the state.
-        # Non-SQLite: the table exists, triggers are a SQLite implementation
-        # detail and are skipped (coordinators fall back to always-reconcile).
-        if conn.dialect.name == "sqlite":
-            for _ddl in _build_extension_sync_state_trigger_ddl():
-                await conn.execute(text(_ddl))
+            await conn.execute(
+                text(
+                    "INSERT INTO settings (key, value, updated_at) "
+                    "VALUES (:key, :value, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO NOTHING"
+                ),
+                {
+                    "key": PORTFOLIO_TOKEN_SECRET_KEY,
+                    "value": new_portfolio_token_secret(),
+                },
+            )
+
+            # Seed the singleton dirty so the first enabled coordinator performs
+            # one complete reconciliation. Existing coordinator state wins.
+            await conn.execute(
+                text(
+                    "INSERT INTO extension_sync_state "
+                    "(extension_id, desired_revision, applied_revision, "
+                    " first_dirty_at, last_dirty_at, force_reload, failure_count, "
+                    " created_at, updated_at) "
+                    "VALUES ('paisa', 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, "
+                    "        1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(extension_id) DO NOTHING"
+                )
+            )
+
+            # Install dirty tracking only after all migrations/backfills.
+            if conn.dialect.name == "sqlite":
+                for _ddl in _build_extension_sync_state_trigger_ddl():
+                    await conn.execute(text(_ddl))
+        else:
+            # Switching the deployment flag off removes live bookkeeping while
+            # preserving settings and audit history for a future re-enable.
+            await conn.execute(
+                text("DELETE FROM extension_sync_state WHERE extension_id = 'paisa'")
+            )
 
     async with engine.begin() as conn:
         # Seed the generic built-in merchant rules (INSERT OR IGNORE, idempotent).

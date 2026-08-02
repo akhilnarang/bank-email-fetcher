@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     db_url: str = "sqlite+aiosqlite:///./data/financial_dashboard.db"
 
+    # Deployment-level opt-in for the optional Paisa integration. When false,
+    # Paisa is not registered, routed, or started and its SQLite dirty-tracking
+    # triggers are absent. Changing this requires an application restart.
+    paisa_enabled: bool = False
+
     email_source_master_key: str = ""  # Fernet key for encrypting credentials
 
     # Optional .env fallback for the categorization Gemini key. The DB setting

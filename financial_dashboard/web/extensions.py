@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from financial_dashboard.core.deps import get_session
 from financial_dashboard.core.templating import get_templates
-from financial_dashboard.extensions import BUILTIN_EXTENSIONS
+from financial_dashboard.extensions import enabled_builtin_extensions
 from financial_dashboard.schemas.extensions import PaisaConfigInput
 from financial_dashboard.services.paisa import surface
 from financial_dashboard.services.paisa.renderers.beancount import quote_string
@@ -27,7 +27,8 @@ from financial_dashboard.services.paisa.renderers.beancount import quote_string
 logger = logging.getLogger(__name__)
 
 templates = get_templates()
-router = APIRouter()
+framework_router = APIRouter()
+paisa_router = APIRouter()
 
 _SETUP_PATH_PLACEHOLDER = "/absolute/path/to/financial-dashboard.journal"
 
@@ -36,10 +37,11 @@ def _manifests(request: FastAPIRequest):
     manager = getattr(request.app.state, "extension_manager", None)
     if manager is not None:
         return manager.all()
-    return BUILTIN_EXTENSIONS
+    paisa_enabled = getattr(request.app.state, "paisa_enabled", True)
+    return enabled_builtin_extensions(paisa_enabled=paisa_enabled)
 
 
-@router.get("/extensions", response_class=HTMLResponse)
+@framework_router.get("/extensions", response_class=HTMLResponse)
 async def extensions_index(
     request: FastAPIRequest,
     session: AsyncSession = Depends(get_session),
@@ -113,7 +115,7 @@ async def _paisa_context(session: AsyncSession, request: FastAPIRequest) -> dict
     }
 
 
-@router.get("/extensions/paisa", response_class=HTMLResponse)
+@paisa_router.get("/extensions/paisa", response_class=HTMLResponse)
 async def paisa_page(
     request: FastAPIRequest,
     session: AsyncSession = Depends(get_session),
@@ -217,7 +219,7 @@ def _form_to_input(form) -> PaisaConfigInput:
     )
 
 
-@router.post("/extensions/paisa")
+@paisa_router.post("/extensions/paisa")
 async def paisa_save(
     request: FastAPIRequest,
     session: AsyncSession = Depends(get_session),
@@ -238,7 +240,7 @@ async def paisa_save(
     )
 
 
-@router.post("/extensions/paisa/generate")
+@paisa_router.post("/extensions/paisa/generate")
 async def paisa_generate_action(
     session: AsyncSession = Depends(get_session),
 ):
@@ -264,7 +266,7 @@ async def paisa_generate_action(
     )
 
 
-@router.post("/extensions/paisa/sync")
+@paisa_router.post("/extensions/paisa/sync")
 async def paisa_sync_action(
     session: AsyncSession = Depends(get_session),
 ):
@@ -295,7 +297,7 @@ async def paisa_sync_action(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/extensions/paisa/audit", response_class=HTMLResponse)
+@paisa_router.get("/extensions/paisa/audit", response_class=HTMLResponse)
 async def paisa_audit_page(
     request: FastAPIRequest,
     session: AsyncSession = Depends(get_session),
@@ -312,7 +314,7 @@ async def paisa_audit_page(
     )
 
 
-@router.get("/extensions/paisa/reports/{report}", response_class=HTMLResponse)
+@paisa_router.get("/extensions/paisa/reports/{report}", response_class=HTMLResponse)
 async def paisa_report_page(
     request: FastAPIRequest,
     report: str,
@@ -330,7 +332,7 @@ async def paisa_report_page(
     )
 
 
-@router.get("/extensions/paisa/reconciliation", response_class=HTMLResponse)
+@paisa_router.get("/extensions/paisa/reconciliation", response_class=HTMLResponse)
 async def paisa_reconciliation_page(
     request: FastAPIRequest,
 ):
@@ -346,6 +348,19 @@ async def paisa_reconciliation_page(
             "safe_link": surface.safe_link(),
         },
     )
+
+
+def get_router(*, paisa_enabled: bool) -> APIRouter:
+    """Build the extension web surface enabled for this deployment."""
+    aggregate = APIRouter()
+    aggregate.include_router(framework_router)
+    if paisa_enabled:
+        aggregate.include_router(paisa_router)
+    return aggregate
+
+
+# Backwards-compatible full router for domain-level tests and direct imports.
+router = get_router(paisa_enabled=True)
 
 
 def _short_error(exc: Exception) -> str:
