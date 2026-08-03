@@ -65,6 +65,13 @@ _CC_PAYMENT_RECEIVED_SUFFIXES = (
     "_cc_bill_paid",
     "_cc_payment_received_alert",
     "_cc_bill_paid_alert",
+    # Slice sends the manual-repayment SMS under the shape
+    # `slice_cc_repayment_received_alert`. The "re" prefix breaks the
+    # `_cc_payment_received_alert` suffix match, so the shape needs its
+    # own entry. Without it, a manual slice bill payment is silently
+    # excluded from `_qualifying_payment_credit_sum` and the statement
+    # stays UNPAID even after the SMS lands.
+    "_cc_repayment_received_alert",
     # `sbi_payment_ack` doesn't follow any `_cc_*` convention because its
     # source email is BillDesk's payment-acknowledgement template, not an
     # SBI Card email. Matched here as a literal full-string. If a future

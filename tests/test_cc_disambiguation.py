@@ -88,6 +88,11 @@ def test_is_cc_payment_received_email_recognises_sms_and_slice_shapes():
     assert is_cc_payment_received_email("indusind_cc_payment_received_alert") is True
     # Slice's bill-autopay SMS.
     assert is_cc_payment_received_email("slice_cc_bill_paid_alert") is True
+    # Slice's manual bill-repayment SMS. The "re" prefix breaks the
+    # `_cc_payment_received_alert` suffix match. Without a dedicated
+    # `_cc_repayment_received_alert` entry, a manual slice bill payment
+    # is silently excluded from CC-payment reconciliation.
+    assert is_cc_payment_received_email("slice_cc_repayment_received_alert") is True
 
 
 def test_is_cc_payment_received_email_recognises_remaining_bill_payment_shapes():
