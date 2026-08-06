@@ -85,6 +85,9 @@
         border-color: var(--clr-credit);
         color: var(--clr-credit);
     }
+    .table.transactions-table {
+        overflow-x: auto;
+    }
     @media (max-width: 1200px) {
         .transactions-filter {
             grid-template-columns: repeat(3, minmax(10rem, 1fr));
@@ -207,7 +210,7 @@
 <section>
 {% if transactions %}
 <figure style="margin: 0;">
-    <div class="table">
+    <div class="table transactions-table">
         <table>
             <thead>
                 <tr>
@@ -217,6 +220,7 @@
                     <th>{{ sort_link('amount', 'Amount') }}</th>
                     <th>{{ sort_link('counterparty', 'Counterparty') }}</th>
                     <th>{{ sort_link('category', 'Category') }}</th>
+                    <th>Note</th>
                     <th>Card / Account</th>
                     <th>Reference</th>
                 </tr>
@@ -245,6 +249,7 @@
                         <span class="badge">{{ category_labels.get(txn.category, txn.category.replace('_', ' ')|title) }}</span>
                         {% endif %}
                     </td>
+                    <td class="text-sm">{{ txn.note or "" }}</td>
                     <td class="text-sm text-muted">{% if txn.card %}<a href="/accounts/{{ txn.card.account_id }}/edit" onclick="event.stopPropagation();">{% if txn.account %}{{ txn.account.label }} - {% endif %}{{ txn.card.label or txn.card.card_mask }}{% if txn.card.label and not txn.card.is_primary %} (addon){% endif %}</a>{% elif txn.account %}<a href="/accounts/{{ txn.account.id }}/edit" onclick="event.stopPropagation();">{{ txn.account.label }}</a>{% else %}{{ txn.card_mask or txn.account_mask or "&mdash;"|safe }}{% endif %}</td>
                     <td class="text-sm text-muted" style="font-family: var(--font-mono);">{{ txn.reference_number or "&mdash;"|safe }}</td>
                 </tr>

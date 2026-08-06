@@ -26,10 +26,7 @@ from financial_dashboard.db import (
 )
 from financial_dashboard.db.models import Category
 from financial_dashboard.exceptions import UnprocessableEntityException
-from financial_dashboard.services.cashflow.buckets import (
-    LABEL_OVERRIDES,
-    internal_slugs_for_scope,
-)
+from financial_dashboard.services.cashflow.buckets import internal_slugs_for_scope
 from financial_dashboard.services.cashflow.report import (
     BLANK_CATEGORY,
     BLANK_COUNTERPARTY,
@@ -39,6 +36,7 @@ from financial_dashboard.services.cashflow.report import (
     is_blank_counterparty,
 )
 from financial_dashboard.services.cashflow.scope import Scope, scope_predicate
+from financial_dashboard.web.transaction_display import category_label
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,19 +115,6 @@ CATEGORY_METHOD_LABELS: dict[str, str] = {
     "llm": "AI",
     "pending_llm": "Pending AI",
 }
-
-
-def _category_label(slug: str) -> str:
-    """User-facing label for a category slug, for the filter dropdown and badges.
-
-    Unlike ``label_for_slug`` (which prefixes unrecognized slugs with
-    ``unmapped:`` for the cashflow report), this title-cases any slug the bucket
-    map does not override — a manually added category is ordinary on this page,
-    not a reporting anomaly.
-    """
-    if slug in LABEL_OVERRIDES:
-        return LABEL_OVERRIDES[slug]
-    return slug.replace("_", " ").title()
 
 
 def _normalize_query_date(value: str | None, field: str) -> NormalizedQueryDate:
@@ -536,7 +521,7 @@ async def transaction_list(
         .scalars()
         .all()
     )
-    category_labels = {slug: _category_label(slug) for slug in active_category_slugs}
+    category_labels = {slug: category_label(slug) for slug in active_category_slugs}
 
     # Build JSON for dependent dropdowns
     cards_by_account: dict[int, list] = {}

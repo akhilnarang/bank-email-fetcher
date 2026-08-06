@@ -72,6 +72,9 @@ from financial_dashboard.services.statements.shared import (
 from financial_dashboard.services.statements.skip_summary import import_skip_summary
 from financial_dashboard.core.uploads import STATEMENTS_DIR, safe_upload_filename
 from financial_dashboard.web.forms import _unlink_statement_file
+from financial_dashboard.web.transaction_display import (
+    hydrate_reconciliation_transactions,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -346,6 +349,7 @@ async def statement_detail(
     card_summaries = []
     if upload.reconciliation_data:
         recon = cc_reconciliation_from_json(upload.reconciliation_data)
+        await hydrate_reconciliation_transactions(session, recon)
         person_groups = group_recon_by_person(recon)
         card_summaries = recon.get("card_summaries", [])
 

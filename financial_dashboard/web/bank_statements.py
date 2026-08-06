@@ -43,6 +43,9 @@ from financial_dashboard.services.statements.shared import (
 from financial_dashboard.services.statements.skip_summary import import_skip_summary
 from financial_dashboard.core.uploads import STATEMENTS_DIR, safe_upload_filename
 from financial_dashboard.web.forms import _unlink_statement_file
+from financial_dashboard.web.transaction_display import (
+    hydrate_reconciliation_transactions,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -173,6 +176,7 @@ async def bank_statement_detail(
     recon = None
     if upload.reconciliation_data:
         recon = reconciliation_from_json(upload.reconciliation_data)
+        await hydrate_reconciliation_transactions(session, recon)
 
     return templates.TemplateResponse(
         request,

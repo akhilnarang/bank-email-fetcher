@@ -4,6 +4,17 @@
 
 {# ── Macros ─────────────────────────────────────────────────────────── #}
 
+{% macro transaction_display_cells(entry) %}
+    <td>
+        {% if not entry.transaction_category or entry.transaction_category == "unknown" %}
+        <span class="badge badge-pending">Uncategorized</span>
+        {% else %}
+        <span class="badge">{{ entry.transaction_category_label }}</span>
+        {% endif %}
+    </td>
+    <td class="text-sm">{{ entry.transaction_note or "" }}</td>
+{% endmacro %}
+
 {% macro imported_row(entry) %}
 <tr onclick="openDetailModal('/transactions/{{ entry.imported_txn_id }}/detail')" style="cursor: pointer;">
     <td class="text-sm">{{ entry.date }}</td>
@@ -16,6 +27,7 @@
     </td>
     <td class="amt {% if entry.direction == 'debit' %}amt-debit{% else %}amt-credit{% endif %}">{% if entry.direction == "debit" %}&minus;{% else %}+{% endif %}&#8377;{{ entry.amount }}</td>
     <td class="text-sm">{{ entry.narration }}</td>
+    {{ transaction_display_cells(entry) }}
     <td class="text-sm text-muted">{{ entry.channel or "" }}</td>
     <td class="text-sm text-muted">#{{ entry.imported_txn_id }}</td>
 </tr>
@@ -34,6 +46,7 @@
     <td class="amt {% if entry.direction == 'debit' %}amt-debit{% else %}amt-credit{% endif %}">{% if entry.direction == "debit" %}&minus;{% else %}+{% endif %}&#8377;{{ entry.amount }}</td>
     <td class="text-sm">{{ entry.narration }}</td>
     <td class="text-sm">{{ entry.db_counterparty or "" }}{% if entry.enriched %} <span class="badge success" title="Updated from statement narration">enriched</span>{% endif %}</td>
+    {{ transaction_display_cells(entry) }}
     <td class="text-sm text-muted">{{ entry.channel or "" }}</td>
 </tr>
 {% endmacro %}
@@ -273,7 +286,7 @@
         <div class="table">
             <table>
                 <thead>
-                    <tr><th>Date</th><th>Direction</th><th>Amount</th><th>Narration</th><th>Channel</th><th>Txn ID</th></tr>
+                    <tr><th>Date</th><th>Direction</th><th>Amount</th><th>Narration</th><th>Category</th><th>Note</th><th>Channel</th><th>Txn ID</th></tr>
                 </thead>
                 <tbody>
                     {% for entry in imported %}
@@ -297,7 +310,7 @@
         <div class="table">
             <table>
                 <thead>
-                    <tr><th>Date</th><th>Direction</th><th>Amount</th><th>Statement Narration</th><th>DB Counterparty</th><th>Channel</th></tr>
+                    <tr><th>Date</th><th>Direction</th><th>Amount</th><th>Statement Narration</th><th>DB Counterparty</th><th>Category</th><th>Note</th><th>Channel</th></tr>
                 </thead>
                 <tbody>
                     {% for entry in recon.matched %}
