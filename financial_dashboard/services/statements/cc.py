@@ -184,6 +184,53 @@ def cc_card_compatible(db_card_mask: str | None, account_card_masks: list[str]) 
     return any(mask_matches(db_mask, card_mask) for card_mask in account_card_masks)
 
 
+def _identifies_one_card(mask: str, account_card_masks: list[str]) -> bool:
+    """Whether ``mask`` singles out one card this account holds.
+
+    True when it matches at least one registered card and every card it matches
+    is mutually compatible — they could all be the one card. A wildcard-only,
+    bank-prefix, or shared-suffix mask that spans two conflicting cards names no
+    single card, so it is not an identification. ``mask`` is already normalized.
+    """
+    matched = [card for card in account_card_masks if mask_matches(mask, card)]
+    if not matched:
+        return False
+    return all(
+        mask_matches(matched[i], matched[j])
+        for i in range(len(matched))
+        for j in range(i + 1, len(matched))
+    )
+
+
+def _confirmed_same_card(
+    stmt_card: str | None,
+    db_card_mask: str | None,
+    account_card_masks: list[str],
+) -> bool:
+    """True only when both masks single out the same registered card.
+
+    Positional agreement alone is not enough: a short suffix such as ``XX12``
+    can denote two cards one account holds. Both sides must resolve to one card,
+    and ``mask_matches`` between them then settles identity — two masks that
+    named different cards would conflict. See ``cc_card_compatible``.
+    """
+    stmt_mask, db_mask = normalize_mask(stmt_card), normalize_mask(db_card_mask)
+    return (
+        mask_matches(stmt_mask, db_mask)
+        and _identifies_one_card(stmt_mask, account_card_masks)
+        and _identifies_one_card(db_mask, account_card_masks)
+    )
+
+
+def _confirmed_different_card(stmt_card: str | None, db_card_mask: str | None) -> bool:
+    """True only when both masks are known and identify different cards.
+
+    Unknown on either side is not a conflict.
+    """
+    stmt_mask, db_mask = normalize_mask(stmt_card), normalize_mask(db_card_mask)
+    return bool(stmt_mask) and bool(db_mask) and not mask_matches(stmt_mask, db_mask)
+
+
 def _refresh_identity(txn: "ParsedCcTransaction") -> str:
     """Everything a refresh would write onto the DB row a statement row wins.
 
@@ -398,6 +445,7 @@ def reconcile_statement(
     txn_by_idx = {
         stmt_idx: txn for stmt_idx, (_list, _dir, txn) in enumerate(stmt_txns)
     }
+    db_by_id = {db_txn.id: db_txn for db_txn in db_transactions}
     contested = []
     for entry in matched:
         rivals = [
@@ -407,6 +455,22 @@ def reconcile_statement(
         ]
         if not rivals:
             continue
+        # A rival on a different card cannot be the DB row this entry won, so it
+        # does not contest it. Prune such rivals only when this entry is itself
+        # card-confirmed on that row: a statement that stamps one header mask on
+        # every printed row carries no per-row card, so it stays conservative
+        # and keeps demoting. See ``cc_card_compatible``.
+        won_mask = db_by_id[entry["db_txn_id"]].card_mask
+        if _confirmed_same_card(entry["card_number"], won_mask, account_card_masks):
+            rivals = [
+                stmt_idx
+                for stmt_idx in rivals
+                if not _confirmed_different_card(
+                    txn_by_idx[stmt_idx].card_number, won_mask
+                )
+            ]
+            if not rivals:
+                continue
         identities = {
             _refresh_identity(txn_by_idx[i]) for i in (entry["stmt_idx"], *rivals)
         }

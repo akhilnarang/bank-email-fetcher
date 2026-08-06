@@ -451,6 +451,173 @@ async def test_statement_rows_two_days_apart_still_contend_for_the_row_between_t
 
 
 @pytest.mark.anyio
+async def test_distinct_addon_cards_disambiguate_contended_rows(session_factory):
+    """Two same-amount rows a day apart, each on its own add-on card, are not
+    rivals. Each DB row's card mask pairs it with exactly one statement row, so
+    the ``+/-1``-day windows overlap yet the cards resolve the contention and
+    both rows match instead of being demoted."""
+    await _seed_account(session_factory)
+    async with session_factory() as session:
+        session.add(
+            Card(account_id=ACCOUNT_ID, card_mask="4111XXXXXXXX1111", label="Add-on 1")
+        )
+        session.add(
+            Card(account_id=ACCOUNT_ID, card_mask="4111XXXXXXXX2222", label="Add-on 2")
+        )
+        await session.commit()
+
+    db1 = await _seed_txn(
+        session_factory,
+        amount=Decimal("100.00"),
+        transaction_date=parse_cc_date("07/04/2026"),
+        counterparty="MERCHANT X",
+        card_mask="4111XXXXXXXX1111",
+    )
+    db2 = await _seed_txn(
+        session_factory,
+        amount=Decimal("100.00"),
+        transaction_date=parse_cc_date("08/04/2026"),
+        counterparty="MERCHANT X",
+        card_mask="4111XXXXXXXX2222",
+    )
+
+    parsed = _parsed(
+        [
+            CcTransaction(
+                date="07/04/2026",
+                narration="MERCHANT X BANGALORE",
+                amount="100.00",
+                card_number="4111XXXXXXXX1111",
+                transaction_type="debit",
+            ),
+            CcTransaction(
+                date="08/04/2026",
+                narration="MERCHANT X BANGALORE IN",
+                amount="100.00",
+                card_number="4111XXXXXXXX2222",
+                transaction_type="debit",
+            ),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["missing"] == []
+    assert {entry["stmt_idx"]: entry["db_txn_id"] for entry in recon["matched"]} == {
+        0: db1,
+        1: db2,
+    }
+
+
+@pytest.mark.anyio
+async def test_ambiguous_short_suffix_does_not_confirm_a_card(session_factory):
+    """A statement mask that matches two of the account's cards singles out
+    neither, so it cannot prune a rival on the other card. Both rows stay
+    conservatively demoted rather than one falsely claiming a match."""
+    await _seed_account(session_factory)
+    async with session_factory() as session:
+        # A second card sharing the last four digits, distinguished only by BIN,
+        # so "XX9012" below denotes either card.
+        session.add(
+            Card(account_id=ACCOUNT_ID, card_mask="5100XXXXXXXX9012", label="Other BIN")
+        )
+        await session.commit()
+
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("100.00"),
+        transaction_date=parse_cc_date("07/04/2026"),
+        counterparty="MERCHANT X",
+        card_mask="4111XXXXXXXX9012",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("100.00"),
+        transaction_date=parse_cc_date("08/04/2026"),
+        counterparty="MERCHANT X",
+        card_mask="5100XXXXXXXX9012",
+    )
+
+    parsed = _parsed(
+        [
+            CcTransaction(
+                date="07/04/2026",
+                narration="CHARGE A",
+                amount="100.00",
+                card_number="XX9012",
+                transaction_type="debit",
+            ),
+            CcTransaction(
+                date="08/04/2026",
+                narration="CHARGE B",
+                amount="100.00",
+                card_number="5100XXXXXXXX9012",
+                transaction_type="debit",
+            ),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_wildcard_only_card_does_not_confirm_and_stays_conservative(
+    session_factory,
+):
+    """A statement row whose card is wildcard-only names no card, so it cannot
+    be confirmed on a DB row and cannot prune a different-card rival. Both rows
+    stay conservatively demoted rather than one falsely claiming a match."""
+    await _seed_account(session_factory)
+    async with session_factory() as session:
+        session.add(
+            Card(account_id=ACCOUNT_ID, card_mask="4111XXXXXXXX1111", label="Add-on 1")
+        )
+        session.add(
+            Card(account_id=ACCOUNT_ID, card_mask="4111XXXXXXXX2222", label="Add-on 2")
+        )
+        await session.commit()
+
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("100.00"),
+        transaction_date=parse_cc_date("07/04/2026"),
+        counterparty="MERCHANT X",
+        card_mask="4111XXXXXXXX1111",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("100.00"),
+        transaction_date=parse_cc_date("08/04/2026"),
+        counterparty="MERCHANT X",
+        card_mask="4111XXXXXXXX2222",
+    )
+
+    parsed = _parsed(
+        [
+            CcTransaction(
+                date="07/04/2026",
+                narration="NEW CHARGE",
+                amount="100.00",
+                card_number="XXXXXXXXXXXXXXXX",
+                transaction_type="debit",
+            ),
+            CcTransaction(
+                date="08/04/2026",
+                narration="MERCHANT X",
+                amount="100.00",
+                card_number="4111XXXXXXXX2222",
+                transaction_type="debit",
+            ),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
 async def test_new_rows_with_no_db_candidate_still_import(session_factory):
     """The ordinary-miss guarantee: two same-day, same-amount statement rows
     with nothing in the DB to claim have empty candidate sets, so neither is
