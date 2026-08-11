@@ -38,6 +38,7 @@ import email as email_lib
 import json
 import logging
 import tempfile
+import unicodedata
 from datetime import date as date_type, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -244,6 +245,226 @@ def _refresh_identity(txn: "ParsedCcTransaction") -> str:
 
 def _match_key(txn_date: date_type, amount: Decimal, direction: str) -> tuple:
     return (txn_date, amount, direction)
+
+
+def _normalize_narration(text: str | None) -> str:
+    """Compose (NFC), lower-case, and collapse whitespace for a containment
+    comparison.
+
+    NFC folds a decomposed accent (``E`` + combining acute) back into its
+    single precomposed character, so a short counterparty cannot match across
+    an accented boundary: ``CAFÉTERIA`` composes to a single ``É`` and no
+    longer contains ``CAFE``. Composition is canonical, not compatibility, so
+    distinct accented names stay distinct (``CAFE`` does not match ``CAFÉ``)
+    and forms like the digit ``①`` are left alone.
+    """
+    if not text:
+        return ""
+    return unicodedata.normalize("NFC", " ".join(text.split()).casefold())
+
+
+# ZWNJ / ZWJ: zero-width join controls that sit within a word in Indic and
+# Perso-Arabic scripts, so they continue a word rather than bound it.
+_JOIN_CONTROLS = ("\u200c", "\u200d")
+
+
+def _is_word_char(ch: str) -> bool:
+    """Whether a character continues a word, for boundary checks.
+
+    Word constituents are alphanumerics, combining marks (Unicode category
+    ``M*``, any script), connector punctuation (``Pc``, which includes the
+    underscore), and the ZWNJ/ZWJ join controls. A match adjacent to any of
+    these sits inside a longer word. ``re``'s ``\\w`` misses the marks and join
+    controls, so it lets a short token match across a decomposed accent, a
+    Devanagari matra, or a Perso-Arabic ZWNJ.
+    """
+    if not ch:
+        return False
+    if ch in _JOIN_CONTROLS:
+        return True
+    category = unicodedata.category(ch)
+    return ch.isalnum() or category == "Pc" or category.startswith("M")
+
+
+def _contains_whole_token(haystack: str, needle: str) -> bool:
+    """Whether ``needle`` occurs in ``haystack`` bounded by non-word characters
+    on both sides, judged by ``_is_word_char``.
+
+    Plain string search, so regex metacharacters in ``needle`` (e.g. the ``*``
+    in ``raz*swiggy``) are literal and there is no backtracking.
+    """
+    if not needle:
+        return False
+    length = len(needle)
+    start = 0
+    while (index := haystack.find(needle, start)) != -1:
+        before = haystack[index - 1] if index > 0 else ""
+        after = haystack[index + length] if index + length < len(haystack) else ""
+        if not _is_word_char(before) and not _is_word_char(after):
+            return True
+        start = index + 1
+    return False
+
+
+def _counterparty_singles_out(row_narration: str | None, db_txn) -> bool:
+    """Whether a statement row specifically names one DB candidate.
+
+    True when the candidate's counterparty appears as a whole word-bounded run
+    inside the row narration, or the two narrations are equal after
+    normalization. Token overlap is deliberately avoided, and containment is
+    word-bounded so a short counterparty cannot match inside an unrelated
+    longer word (``MOB`` must not be read inside ``MOBILE`` or ``MOBILÉ``, nor
+    ``राम`` inside ``रामा``).
+    """
+    narration = _normalize_narration(row_narration)
+    if not narration:
+        return False
+    counterparty = _normalize_narration(db_txn.counterparty)
+    if counterparty and _contains_whole_token(narration, counterparty):
+        return True
+    db_narration = _normalize_narration(db_txn.raw_description)
+    return bool(db_narration) and db_narration == narration
+
+
+def _row_names_candidate(stmt_idx: int, cid: int, txn_by_idx, db_by_id) -> bool:
+    """Whether a statement row names a DB candidate as its own.
+
+    The row narration must single the candidate's counterparty out, and the
+    row must not be confirmed on a different card than the candidate — a
+    positive card conflict rules the candidate out. The reachability sets are
+    card-blind, so the card check has to be applied here.
+    """
+    if _confirmed_different_card(
+        txn_by_idx[stmt_idx].card_number, db_by_id[cid].card_mask
+    ):
+        return False
+    return _counterparty_singles_out(txn_by_idx[stmt_idx].narration, db_by_id[cid])
+
+
+def _resolve_contested_by_counterparty(
+    contested: list[dict],
+    candidate_sets: dict[int, set[int]],
+    txn_by_idx: dict,
+    db_by_id: dict,
+) -> set[int]:
+    """Reassign contested winners that each name one distinct candidate.
+
+    A group of statement rows tied on amount, date, and direction with no
+    reference is only a genuine tie when their narrations cannot tell the
+    candidates apart. It resolves only when the naming is unambiguous on both
+    sides of the pairing:
+
+    - Row side: every contested winner names exactly one of the candidates it
+      can reach — claimed by the greedy pass or not. A row that also names an
+      unclaimed tied candidate is ambiguous and stays demoted, so the outcome
+      never turns on which candidates the greedy pass happened to claim.
+    - Candidate side: every won candidate is named by exactly one reaching row.
+      A rival that lost the greedy race, or a same-tie duplicate, still counts,
+      so it spoils the resolution instead of being ignored.
+
+    When both hold, the greedy pick merely crossed the pairing: rewrite each
+    entry's ``db_txn_id`` to the named candidate and keep the match.
+    Reassignment stays within the candidates the group already won, so the
+    group's total claim never grows. Returns the ``id(entry)`` of every entry
+    that resolved and must not be demoted; anything else stays contested.
+    """
+    resolved: set[int] = set()
+    if len(contested) < 2:
+        return resolved
+
+    # Group contested entries by shared reachability: two entries belong to the
+    # same tie when their candidate windows overlap.
+    parent = list(range(len(contested)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        parent[find(a)] = find(b)
+
+    for i in range(len(contested)):
+        for j in range(i + 1, len(contested)):
+            si = candidate_sets.get(contested[i]["stmt_idx"], set())
+            sj = candidate_sets.get(contested[j]["stmt_idx"], set())
+            if si & sj:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(len(contested)):
+        groups.setdefault(find(i), []).append(i)
+
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        entries = [contested[i] for i in members]
+        entry_by_row = {entry["stmt_idx"]: entry for entry in entries}
+        group_rows = set(entry_by_row)
+        # Each contested winner holds one distinct greedily-won candidate.
+        group_candidate_ids = {entry["db_txn_id"] for entry in entries}
+
+        # Row side: each winner names exactly one candidate it can reach, and
+        # that candidate is one the group won (an unclaimed candidate cannot be
+        # reassigned without growing the claim, so its naming only adds doubt).
+        assignment: dict[int, int] = {}  # stmt_idx -> candidate id
+        singled_out = True
+        for stmt_idx in group_rows:
+            named = [
+                cid
+                for cid in candidate_sets.get(stmt_idx, set())
+                if _row_names_candidate(stmt_idx, cid, txn_by_idx, db_by_id)
+            ]
+            if len(named) != 1 or named[0] not in group_candidate_ids:
+                singled_out = False
+                break
+            assignment[stmt_idx] = named[0]
+        if not singled_out:
+            continue
+        # The winners must pair bijectively with the candidates they won.
+        if set(assignment.values()) != group_candidate_ids:
+            continue
+
+        # Candidate side: every won candidate is named by exactly one reaching
+        # row. A rival that lost the greedy race, or a same-tie duplicate, still
+        # counts, so a genuinely contended candidate spoils the resolution.
+        contesting_rows = {
+            stmt_idx
+            for stmt_idx, reachable in candidate_sets.items()
+            if reachable & group_candidate_ids
+        }
+        spoiled = any(
+            sum(
+                1
+                for stmt_idx in contesting_rows
+                if cid in candidate_sets[stmt_idx]
+                and _row_names_candidate(stmt_idx, cid, txn_by_idx, db_by_id)
+            )
+            != 1
+            for cid in group_candidate_ids
+        )
+        if spoiled:
+            continue
+
+        for stmt_idx, cid in assignment.items():
+            entry = entry_by_row[stmt_idx]
+            db_txn = db_by_id[cid]
+            entry["db_txn_id"] = db_txn.id
+            entry["db_counterparty"] = db_txn.counterparty
+            entry["db_reference"] = db_txn.reference_number
+            entry["db_date"] = str(db_txn.transaction_date)
+            # The greedy reason described the candidate this row first won; a
+            # cross-date swap can make it stale, so recompute exact-vs-offset
+            # from the reassigned candidate.
+            row_date = parse_cc_date(txn_by_idx[stmt_idx].date)
+            entry["decision_reason"] = (
+                "matched_exact_date"
+                if db_txn.transaction_date == row_date
+                else "matched_date_offset"
+            )
+            resolved.add(id(entry))
+    return resolved
 
 
 _CC_RECONCILIATION_GATES = (
@@ -476,6 +697,16 @@ def reconcile_statement(
         }
         if len(identities) > 1:
             contested.append(entry)
+
+    # A contested group is not a genuine tie when each row names one distinct
+    # candidate by counterparty. The greedy pick may have crossed the pairing;
+    # reassign within the group and keep the matches. Only positive,
+    # group-injective evidence resolves — anything short of it stays demoted.
+    resolved = _resolve_contested_by_counterparty(
+        contested, candidate_sets, txn_by_idx, db_by_id
+    )
+    contested = [entry for entry in contested if id(entry) not in resolved]
+
     for entry in contested:
         matched.remove(entry)
         missing.append(

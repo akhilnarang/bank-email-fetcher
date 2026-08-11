@@ -883,6 +883,471 @@ async def test_rivals_with_differing_narrations_still_demote_the_winner(
 
 
 @pytest.mark.anyio
+async def test_two_candidates_pair_to_their_matching_narration(session_factory):
+    """Two DB rows tie on amount and date with no reference, but their
+    counterparties differ. Each statement row names one of them, so the
+    counterparty tiebreak pairs them instead of demoting both as a false tie.
+    """
+    await _seed_account(session_factory)
+    cgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="CGST ON FEE",
+        raw_description="CGST ON FEE",
+    )
+    sgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="SGST ON FEE",
+        raw_description="SGST ON FEE",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CGST ON FEE"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="SGST ON FEE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["missing"] == []
+    assert {entry["narration"]: entry["db_txn_id"] for entry in recon["matched"]} == {
+        "CGST ON FEE": cgst_id,
+        "SGST ON FEE": sgst_id,
+    }
+
+
+@pytest.mark.anyio
+async def test_counterparty_tiebreak_overrides_greedy_insertion_order(session_factory):
+    """The greedy pick pairs rows to candidates in DB insertion order, so it
+    can cross the correct pairing. The group-injective counterparty assignment
+    reassigns each row to the candidate whose counterparty it names — proving
+    the tiebreak is not just greedy luck.
+    """
+    await _seed_account(session_factory)
+    # DB insertion order is SGST then CGST — the reverse of the statement rows.
+    sgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="SGST ON FEE",
+        raw_description="SGST ON FEE",
+    )
+    cgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="CGST ON FEE",
+        raw_description="CGST ON FEE",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CGST ON FEE"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="SGST ON FEE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["missing"] == []
+    assert {entry["stmt_idx"]: entry["db_txn_id"] for entry in recon["matched"]} == {
+        0: cgst_id,
+        1: sgst_id,
+    }
+
+
+@pytest.mark.anyio
+async def test_a_missing_duplicate_row_spoils_the_counterparty_tiebreak(session_factory):
+    """The tiebreak weighs the whole tie, not only the greedy winners.
+
+    Two DB rows tie with no reference, but three statement rows name them: two
+    say ``CGST ON FEE`` and one says ``SGST ON FEE``. The CGST candidate is
+    named by two rows, so which one is really it stays genuinely ambiguous. The
+    winners must not be kept matched just because the third row lost the greedy
+    race — every row stays demoted.
+    """
+    await _seed_account(session_factory)
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="CGST ON FEE",
+        raw_description="CGST ON FEE",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="SGST ON FEE",
+        raw_description="SGST ON FEE",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CGST ON FEE"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="SGST ON FEE"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CGST ON FEE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True, True]
+
+
+@pytest.mark.parametrize(
+    "db_order",
+    [
+        ("CGST ON FEE", "SGST ON FEE", "SGST"),
+        ("CGST ON FEE", "SGST", "SGST ON FEE"),
+    ],
+)
+@pytest.mark.anyio
+async def test_an_unclaimed_tied_candidate_spoils_the_tiebreak(
+    session_factory, db_order
+):
+    """A row that also names an unclaimed tied candidate stays ambiguous.
+
+    Three DB rows tie with no reference: counterparties ``CGST ON FEE``,
+    ``SGST ON FEE``, and the terser ``SGST``. Two statement rows name them.
+    ``SGST ON FEE`` word-matches both ``SGST ON FEE`` and ``SGST``, so which
+    candidate it is stays genuinely ambiguous — even though only two of the
+    three candidates are ever claimed. The pair must stay demoted, and the
+    outcome must not flip with DB insertion order.
+    """
+    await _seed_account(session_factory)
+    for counterparty in db_order:
+        await _seed_txn(
+            session_factory,
+            amount=Decimal("34.00"),
+            counterparty=counterparty,
+            raw_description=counterparty,
+        )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CGST ON FEE"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="SGST ON FEE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_counterparty_containment_respects_word_boundaries(session_factory):
+    """Containment matches a whole counterparty, not a fragment of a longer
+    word. ``CRED`` must not be read inside ``CREDIT MANTRA`` nor ``MOB`` inside
+    ``MOBILE STORE``, so neither row singles a candidate out and both stay
+    demoted rather than pairing on a coincidental substring.
+    """
+    await _seed_account(session_factory)
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="CRED",
+        raw_description="CRED",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="MOB",
+        raw_description="MOB",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CREDIT MANTRA"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="MOBILE STORE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_counterparty_tiebreak_ignores_a_different_card_namer(session_factory):
+    """A row confirmed on a different card cannot be a candidate's transaction,
+    so it must not spoil the tiebreak.
+
+    Two same-card tax rows resolve by counterparty even though a third row on
+    another card shares the amount and date and repeats one narration. Were the
+    third row counted as a rival namer, the pair would demote on a card the
+    candidates cannot belong to.
+    """
+    await _seed_account(session_factory)
+    async with session_factory() as session:
+        session.add(
+            Card(account_id=ACCOUNT_ID, card_mask="4111XXXXXXXX1111", label="Add-on 1")
+        )
+        session.add(
+            Card(account_id=ACCOUNT_ID, card_mask="4111XXXXXXXX2222", label="Add-on 2")
+        )
+        await session.commit()
+
+    cgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="CGST ON FEE",
+        raw_description="CGST ON FEE",
+        card_mask="4111XXXXXXXX1111",
+    )
+    sgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="SGST ON FEE",
+        raw_description="SGST ON FEE",
+        card_mask="4111XXXXXXXX1111",
+    )
+
+    parsed = _parsed(
+        [
+            CcTransaction(
+                date="07/04/2026",
+                narration="CGST ON FEE",
+                amount="34.00",
+                card_number="4111XXXXXXXX1111",
+                transaction_type="debit",
+            ),
+            CcTransaction(
+                date="07/04/2026",
+                narration="SGST ON FEE",
+                amount="34.00",
+                card_number="4111XXXXXXXX1111",
+                transaction_type="debit",
+            ),
+            CcTransaction(
+                date="07/04/2026",
+                narration="CGST ON FEE",
+                amount="34.00",
+                card_number="4111XXXXXXXX2222",
+                transaction_type="debit",
+            ),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert {entry["narration"]: entry["db_txn_id"] for entry in recon["matched"]} == {
+        "CGST ON FEE": cgst_id,
+        "SGST ON FEE": sgst_id,
+    }
+    assert [entry["stmt_idx"] for entry in recon["missing"]] == [2]
+    assert recon["missing"][0]["ambiguous"] is True
+
+
+@pytest.mark.anyio
+async def test_two_candidates_without_narration_evidence_still_demote(session_factory):
+    """The tiebreak only adds resolutions. Two DB rows tie with no reference
+    and their counterparties appear in neither statement narration, so nothing
+    singles a candidate out — the pair stays demoted rather than guessed.
+    """
+    await _seed_account(session_factory)
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="MERCHANT A",
+        raw_description="MERCHANT A",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="MERCHANT B",
+        raw_description="MERCHANT B",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="UNRELATED ONE"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="UNRELATED TWO"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_counterparty_containment_ignores_combining_marks(session_factory):
+    """A counterparty must not match across an accented boundary.
+
+    ``CAFE`` must not be read inside ``CAFÉTERIA`` when the accent is a
+    combining mark (``E`` + U+0301) — the combining mark is not a word
+    character, so a naive boundary would let a short counterparty falsely
+    single out an unrelated candidate and preserve a wrong pairing.
+    """
+    await _seed_account(session_factory)
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="CAFE",
+        raw_description="CAFE",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="BOOKS",
+        raw_description="BOOKS",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(
+                date="07/04/2026", amount="34.00", narration="CAFÉTERIA CENTRAL"
+            ),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="BOOKS STORE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_counterparty_containment_is_accent_sensitive(session_factory):
+    """Accented and unaccented names stay distinct.
+
+    A ``CAFE`` candidate must not resolve a ``CAFÉ`` row (precomposed é):
+    normalization is canonical (NFC), not compatibility, so the tiebreak holds
+    the pair back rather than guessing they are the same merchant.
+    """
+    await _seed_account(session_factory)
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="CAFE",
+        raw_description="CAFE",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="BOOKS",
+        raw_description="BOOKS",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CAFÉ CENTRAL"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="BOOKS STORE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_counterparty_containment_respects_non_latin_boundaries(session_factory):
+    """The word boundary holds for non-Latin scripts too.
+
+    A Devanagari vowel sign (matra) is a combining mark that NFC does not
+    precompose, so a name must not be read inside a longer word that only adds
+    a matra: candidate राम must not match inside रामा.
+    """
+    await _seed_account(session_factory)
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="राम",
+        raw_description="राम",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="BOOKS",
+        raw_description="BOOKS",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="रामा CENTRAL"),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="BOOKS STORE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_counterparty_containment_respects_zero_width_joiners(session_factory):
+    """A zero-width non-joiner is a within-word control, not a boundary.
+
+    ``SHOP`` must not match inside ``SHOP``+U+200C+``LIFT``: the ZWNJ/ZWJ join
+    controls join word parts in several scripts (Indic and Perso-Arabic), so
+    they continue a word for boundary purposes.
+    """
+    await _seed_account(session_factory)
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="SHOP",
+        raw_description="SHOP",
+    )
+    await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        counterparty="BOOKS",
+        raw_description="BOOKS",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(
+                date="07/04/2026", amount="34.00", narration="SHOP\u200cLIFT CENTRAL"
+            ),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="BOOKS STORE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    assert recon["matched"] == []
+    assert [entry["ambiguous"] for entry in recon["missing"]] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_reassignment_refreshes_the_decision_reason(session_factory):
+    """A cross-date reassignment must refresh the evidence reason.
+
+    The greedy pick recorded the candidate it first won; after the tiebreak
+    swaps each row to a candidate one day away, the reason must describe the
+    reassigned candidate (offset), not the greedily-won one (exact).
+    """
+    await _seed_account(session_factory)
+    cgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        transaction_date=parse_cc_date("07/04/2026"),
+        counterparty="CGST ON FEE",
+        raw_description="CGST ON FEE",
+    )
+    sgst_id = await _seed_txn(
+        session_factory,
+        amount=Decimal("34.00"),
+        transaction_date=parse_cc_date("08/04/2026"),
+        counterparty="SGST ON FEE",
+        raw_description="SGST ON FEE",
+    )
+
+    parsed = _parsed(
+        [
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="SGST ON FEE"),
+            _stmt_txn(date="08/04/2026", amount="34.00", narration="CGST ON FEE"),
+        ]
+    )
+    recon = await _reconcile(session_factory, parsed)
+
+    by_narration = {entry["narration"]: entry for entry in recon["matched"]}
+    assert by_narration["SGST ON FEE"]["db_txn_id"] == sgst_id
+    assert by_narration["CGST ON FEE"]["db_txn_id"] == cgst_id
+    assert by_narration["SGST ON FEE"]["decision_reason"] == "matched_date_offset"
+    assert by_narration["CGST ON FEE"]["decision_reason"] == "matched_date_offset"
+
+
+@pytest.mark.anyio
 async def test_a_row_masked_with_a_deleted_card_is_held_back_not_reimported(
     session_factory,
 ):
