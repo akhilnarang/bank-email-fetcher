@@ -222,15 +222,21 @@ def _reference_compatible_ids(
     db_by_id: dict[int, Transaction],
     *,
     amount: Decimal,
-    statement_balance: str | None,
 ) -> list[int]:
-    """Filter exact-reference candidates by amount and known balance."""
+    """Filter exact-reference candidates by amount alone.
+
+    An exact, non-null reference is the strongest identity signal the
+    reconciler has. Balance must not veto it: an SMS-sourced row reports
+    available balance while the statement reports book balance, so equal
+    references with unequal balances is expected. ``uq_transactions_ref`` is
+    unique on ``(bank, reference_number, direction)``, so one account holds at
+    most one row per reference bucket — balance has nothing to arbitrate.
+    """
     return [
         candidate_id
         for candidate_id in candidate_ids or []
         if (candidate := db_by_id.get(candidate_id)) is not None
         and Decimal(str(candidate.amount)) == amount
-        and _known_balance_compatible(candidate.balance, statement_balance)
     ]
 
 
@@ -367,12 +373,22 @@ def _is_statement_candidate_compatible(
     )
     candidate_channel = candidate_transaction.channel
 
+    # Exact, non-null reference equality overrides a balance disagreement: an
+    # SMS-sourced row reports available balance while the statement reports
+    # book balance, so equal references with unequal balances is expected. The
+    # unique reference index leaves at most one candidate, so balance has
+    # nothing to weigh. The veto stays below for the fuzzy cases, where a
+    # balance disagreement is a real negative signal.
+    if (
+        statement_reference
+        and candidate_reference
+        and statement_reference == candidate_reference
+    ):
+        return True
+
     if not _known_balance_compatible(candidate_transaction.balance, statement_balance):
         return False
-    if (
-        not (statement_reference and candidate_reference)
-        or statement_reference == candidate_reference
-    ):
+    if not (statement_reference and candidate_reference):
         return True
 
     if has_date_offset:
@@ -697,7 +713,6 @@ def reconcile_bank_statement(
             reference_ids,
             db_by_id,
             amount=amount,
-            statement_balance=txn.balance,
         )
 
     # Pass 1: reference-number matches across all stmt rows.

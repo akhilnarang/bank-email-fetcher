@@ -140,8 +140,16 @@ def test_incompatible_reference_row_does_not_demote_valid_winner():
     assert recon["missing"][0]["candidate_transaction_ids"] == [db_txn.id]
 
 
-def test_reference_match_refuses_contradictory_known_balance():
-    """Equal amount/reference cannot override conflicting post-event balances."""
+def test_reference_match_ignores_contradictory_known_balance():
+    """An exact, non-null reference identifies the transaction even when the
+    post-event balances disagree.
+
+    An SMS-sourced row reports available balance while the statement reports
+    book balance, so equal references with unequal balances is expected, not
+    contradictory. ``uq_transactions_ref`` is unique on
+    ``(bank, reference_number, direction)``, so one account holds at most one
+    row per reference bucket — balance has nothing to arbitrate.
+    """
     db_txn = StubDbTxn(
         id=5255,
         transaction_date=datetime.date(2026, 4, 14),
@@ -164,9 +172,41 @@ def test_reference_match_refuses_contradictory_known_balance():
 
     recon = reconcile_bank_statement(parsed, [db_txn], account_id=1)
 
+    assert [entry["db_txn_id"] for entry in recon["matched"]] == [db_txn.id]
+    assert recon["missing"] == []
+
+
+def test_fuzzy_no_ref_path_still_refuses_on_contradictory_balance():
+    """The balance veto stays a negative signal on the fuzzy path.
+
+    A DB row with no reference and a statement row with one line up on
+    date, amount, and direction, but their known balances contradict. Only
+    exact-reference equality overrides a balance disagreement; the fuzzy
+    either-ref-missing path must still refuse this pairing.
+    """
+    db_txn = StubDbTxn(
+        id=13,
+        transaction_date=datetime.date(2026, 4, 14),
+        amount=Decimal("500.00"),
+        direction="debit",
+        reference_number=None,
+        balance=Decimal("9999.00"),
+    )
+    parsed = _stmt(
+        [
+            _txn(
+                date="14/04/2026",
+                amount="500.00",
+                direction="debit",
+                ref="REF-Z",
+                balance="1,111.00",
+            )
+        ]
+    )
+
+    recon = reconcile_bank_statement(parsed, [db_txn], account_id=1)
+
     assert recon["matched"] == []
-    assert recon["missing"][0]["ambiguous"] is True
-    assert recon["missing"][0]["candidate_transaction_ids"] == [db_txn.id]
 
 
 def test_ref_match_takes_priority_over_date_fallback():
