@@ -7,8 +7,10 @@ StartLimitBurst=5
 Type=simple
 WorkingDirectory=/home/akhil/financial-dashboard
 # The app loads its own .env from the working directory (pydantic-settings).
-# `uv run` syncs the venv to uv.lock on start, so a deploy is pull + restart.
-ExecStart=/home/akhil/.local/bin/uv run fastapi run
+# --no-sync: do not touch the venv at start. The systemd environment has no
+# git auth, so a sync that had to fetch a git dep would fail; the installer and
+# deploy.sh run `uv sync` in the user's environment instead.
+ExecStart=/home/akhil/.local/bin/uv run --no-sync fastapi run
 Restart=always
 RestartSec=5s
 TimeoutStopSec=90s
