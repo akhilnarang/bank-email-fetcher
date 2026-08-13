@@ -955,7 +955,9 @@ async def test_counterparty_tiebreak_overrides_greedy_insertion_order(session_fa
 
 
 @pytest.mark.anyio
-async def test_a_missing_duplicate_row_spoils_the_counterparty_tiebreak(session_factory):
+async def test_a_missing_duplicate_row_spoils_the_counterparty_tiebreak(
+    session_factory,
+):
     """The tiebreak weighs the whole tie, not only the greedy winners.
 
     Two DB rows tie with no reference, but three statement rows name them: two
@@ -1192,9 +1194,7 @@ async def test_counterparty_containment_ignores_combining_marks(session_factory)
 
     parsed = _parsed(
         [
-            _stmt_txn(
-                date="07/04/2026", amount="34.00", narration="CAFÉTERIA CENTRAL"
-            ),
+            _stmt_txn(date="07/04/2026", amount="34.00", narration="CAFÉTERIA CENTRAL"),
             _stmt_txn(date="07/04/2026", amount="34.00", narration="BOOKS STORE"),
         ]
     )
