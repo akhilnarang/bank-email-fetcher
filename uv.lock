@@ -55,7 +55,7 @@ dependencies = [
 [[package]]
 name = "bank-sms-parser"
 version = "0.1.0"
-source = { git = "https://github.com/akhilnarang/bank-sms-parser#8ccfe153cc21c2d9e5f29dcc247dc4188b5d3175" }
+source = { git = "https://github.com/akhilnarang/bank-sms-parser#19ff448c6c4121883c971a70869635c5523331dc" }
 dependencies = [
     { name = "pydantic" },
     { name = "python-dateutil" },
