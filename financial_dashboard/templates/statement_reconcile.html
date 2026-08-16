@@ -247,6 +247,185 @@
         .stmt-hero dd { font-size: 1.6rem; }
         .stmt-counts { padding-left: 1.25rem; }
     }
+
+    .stmt-payments-card {
+        margin-bottom: 2rem;
+        padding: 1.25rem 1.5rem;
+    }
+
+    .stmt-payments-title {
+        margin: 0 0 1rem;
+        font-size: 1.05rem;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+    }
+
+    .stmt-payments-status {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        padding: 0.9rem 1rem;
+        background: var(--surface-muted);
+        border: 1px solid var(--border-light);
+        border-radius: 10px;
+    }
+
+    .stmt-payments-metric {
+        min-width: 0;
+        margin: 0;
+        padding: 0 1rem;
+        border-left: 1px solid var(--border-light);
+    }
+
+    .stmt-payments-metric:first-child {
+        padding-left: 0;
+        border-left: 0;
+    }
+
+    .stmt-payments-metric:last-child {
+        padding-right: 0;
+    }
+
+    .stmt-payments-metric dt {
+        margin-bottom: 0.25rem;
+        font-size: 0.62rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        opacity: 0.45;
+    }
+
+    .stmt-payments-metric dd {
+        margin: 0;
+        font-size: 1rem;
+        line-height: 1.25;
+    }
+
+    .stmt-payments-status-metric dd {
+        font-family: var(--font-body);
+    }
+
+    .stmt-payments-badge-unpaid {
+        background: var(--surface-inset);
+        color: inherit;
+        border: 1px solid var(--border-light);
+        opacity: 0.7;
+    }
+
+    .stmt-payments-section {
+        margin-top: 1.25rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid var(--border-light);
+    }
+
+    .stmt-payments-subtitle {
+        margin: 0 0 0.65rem;
+        font-size: 0.9rem;
+        font-weight: 600;
+    }
+
+    .stmt-payments-figure {
+        margin: 0;
+    }
+
+    .stmt-payments-table table {
+        margin: 0;
+    }
+
+    .stmt-payments-settled-row {
+        cursor: pointer;
+    }
+
+    .stmt-payments-amount {
+        text-align: right;
+    }
+
+    .stmt-payments-txn-id,
+    .stmt-payments-card-mask {
+        font-family: var(--font-mono);
+        font-size: 0.76rem;
+    }
+
+    .stmt-payments-empty {
+        margin: 0;
+        padding: 0.35rem 0;
+    }
+
+    .stmt-payments-pending-row {
+        background: var(--clr-pending-bg);
+    }
+
+    .stmt-payments-pending-row > td:first-child {
+        border-left: 3px dashed var(--clr-pending-fg);
+    }
+
+    .stmt-payments-secondary {
+        display: block;
+        margin-top: 0.15rem;
+        font-size: 0.72rem;
+        line-height: 1.2;
+        opacity: 0.55;
+    }
+
+    .stmt-payments-action-heading,
+    .stmt-payments-action {
+        text-align: right;
+    }
+
+    .stmt-payments-settle {
+        margin: 0;
+        padding: 0.3rem 0.7rem;
+        border: 1px solid var(--border-light);
+        border-radius: 999px;
+        background: var(--surface-muted);
+        color: inherit;
+        font-family: var(--font-body);
+        font-size: 0.78rem;
+        font-weight: 600;
+        line-height: 1.1;
+        cursor: pointer;
+    }
+
+    .stmt-payments-settle:hover {
+        border-color: var(--clr-pending-fg);
+    }
+
+    @media (max-width: 768px) {
+        .stmt-payments-card {
+            padding: 1.25rem;
+        }
+
+        .stmt-payments-status {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            row-gap: 1rem;
+        }
+
+        .stmt-payments-metric:nth-child(3) {
+            padding-left: 0;
+            border-left: 0;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .stmt-payments-status {
+            grid-template-columns: 1fr;
+        }
+
+        .stmt-payments-metric,
+        .stmt-payments-metric:nth-child(3) {
+            padding: 0.65rem 0;
+            border-left: 0;
+            border-top: 1px solid var(--border-light);
+        }
+
+        .stmt-payments-metric:first-child {
+            padding-top: 0;
+            border-top: 0;
+        }
+
+        .stmt-payments-metric:last-child {
+            padding-bottom: 0;
+        }
+    }
 </style>
 
 {% if error %}
@@ -369,6 +548,120 @@
         </div>
     </div>
 </div>
+
+{# ── Payments ──────────────────────────────────────────────────────── #}
+
+{% if payments %}
+<article class="card stmt-payments-card">
+    <h3 class="stmt-payments-title">Payments</h3>
+
+    <div class="stmt-payments-status">
+        <dl class="stmt-payments-metric">
+            <dt>Paid</dt>
+            <dd class="amt amt-credit">&#8377;{{ "%.2f"|format(upload.payment_paid_amount or 0) }}</dd>
+        </dl>
+        <dl class="stmt-payments-metric">
+            <dt>Total due</dt>
+            <dd class="amt">{% if upload.total_amount_due %}&#8377;{{ upload.total_amount_due }}{% else %}&mdash;{% endif %}</dd>
+        </dl>
+        <dl class="stmt-payments-metric">
+            <dt>Remaining</dt>
+            <dd class="amt">{% if payments.remaining is not none %}&#8377;{{ payments.remaining }}{% else %}&mdash;{% endif %}</dd>
+        </dl>
+        <dl class="stmt-payments-metric stmt-payments-status-metric">
+            <dt>Status</dt>
+            <dd>
+                {% if upload.payment_status.value == "paid" %}
+                <span class="badge success-outline">paid</span>
+                {% elif upload.payment_status.value == "partially_paid" %}
+                <span class="badge badge-pending">partially paid</span>
+                {% elif upload.payment_status.value == "late" %}
+                <span class="badge danger">late</span>
+                {% else %}
+                <span class="badge stmt-payments-badge-unpaid">unpaid</span>
+                {% endif %}
+            </dd>
+        </dl>
+    </div>
+
+    <section class="stmt-payments-section">
+        <h4 class="stmt-payments-subtitle">Payments received</h4>
+
+        {% if payments.settled %}
+        <figure class="stmt-payments-figure">
+            <div class="table stmt-payments-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th class="stmt-payments-amount">Amount</th>
+                            <th>Counterparty</th>
+                            <th>Txn ID</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in payments.settled %}
+                        <tr class="stmt-payments-settled-row"
+                            onclick="openDetailModal('/transactions/{{ p.txn_id }}/detail')">
+                            <td class="text-sm">{{ p.date }}</td>
+                            <td class="amt amt-credit stmt-payments-amount">+&#8377;{{ p.amount }}</td>
+                            <td class="text-sm">{{ p.counterparty }}</td>
+                            <td class="text-sm text-muted stmt-payments-txn-id">#{{ p.txn_id }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </figure>
+        {% else %}
+        <p class="text-sm text-muted stmt-payments-empty">No payments recorded yet</p>
+        {% endif %}
+    </section>
+
+    {% if payments.pending %}
+    <section class="stmt-payments-section stmt-payments-pending">
+        <h4 class="stmt-payments-subtitle">Pending &ndash; awaiting settlement</h4>
+
+        <figure class="stmt-payments-figure">
+            <div class="table stmt-payments-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="stmt-payments-amount">Amount</th>
+                            <th>Date</th>
+                            <th>Card</th>
+                            <th>Status</th>
+                            <th class="stmt-payments-action-heading">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for pp in payments.pending %}
+                        <tr class="stmt-payments-pending-row">
+                            <td class="amt amt-credit stmt-payments-amount">+&#8377;{{ pp.amount }}</td>
+                            <td class="text-sm">{{ pp.date }}</td>
+                            <td>
+                                <span class="stmt-payments-card-mask">{{ pp.card_mask }}</span>
+                                {% if pp.available_limit %}<small class="stmt-payments-secondary">avl limit &#8377;{{ pp.available_limit }}</small>{% endif %}
+                            </td>
+                            <td><span class="badge badge-pending">provisional</span></td>
+                            <td class="stmt-payments-action">
+                                <form method="post"
+                                      action="/statements/{{ upload.id }}/settle-sms/{{ pp.sms_id }}"
+                                      onsubmit="return confirm('Create a payment transaction of ₹{{ pp.amount }} toward this card?')"
+                                      style="margin:0">
+                                    <button type="submit" class="stmt-payments-settle">Settle</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </figure>
+    </section>
+    {% endif %}
+</article>
+{% endif %}
 
 {# ── Card Summaries (multi-card only) ──────────────────────────────── #}
 

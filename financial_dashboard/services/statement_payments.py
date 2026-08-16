@@ -1,0 +1,372 @@
+"""Payment view-model for the CC statement detail page.
+
+The statement page shows three things for one CC cycle:
+- a payment-status line (paid / total / remaining),
+- the real credit transactions received against the cycle (settled), and
+- provisional bill-payment SMS not yet in the ledger (pending), each with a
+  manual "settle" action.
+
+A provisional CC-payment SMS is notify-only in the pipeline: it makes no
+Transaction row. So the pending set is not a stored table. It is derived live
+by re-parsing the account's unlinked SMS in the cycle window and keeping the
+ones the parser calls a provisional credit. Once a row settles it links to a
+Transaction and drops off the pending set on its own. This is deliberately
+self-healing: no staging table to clean up.
+"""
+
+import logging
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bank_sms_parser import ParseError, UnsupportedSmsTypeError, parse_sms
+
+from financial_dashboard.db import (
+    Account,
+    SmsMessage,
+    StatementUpload,
+    Transaction,
+)
+from financial_dashboard.services.cc_disambiguation import (
+    is_cc_payment_received_email,
+)
+from financial_dashboard.services.sms_pipeline import parsed_sms_to_txn_data
+from financial_dashboard.services.statements.cc import parse_cc_amount
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SettledPayment:
+    """A real credit transaction counted against this cycle."""
+
+    txn_id: int
+    date: str
+    amount: str
+    counterparty: str
+
+
+@dataclass(frozen=True)
+class PendingPayment:
+    """A provisional bill-payment SMS not yet in the ledger."""
+
+    sms_id: int
+    amount: str
+    date: str
+    card_mask: str
+    available_limit: str | None
+
+
+@dataclass(frozen=True)
+class PaymentsView:
+    """Everything the statement page's Payments panel needs."""
+
+    settled: list[SettledPayment]
+    pending: list[PendingPayment]
+    remaining: str | None
+
+
+def _fmt_amount(value) -> str:
+    return f"{Decimal(str(value)):,.2f}"
+
+
+async def _cycle_bounds(
+    session: AsyncSession, upload: StatementUpload
+) -> tuple[date, date | None]:
+    """Return the cycle's ``[start, end)`` dates for this statement.
+
+    Start is this statement's generation date. End is the NEXT statement's
+    generation date for the same account, or ``None`` (open) when this is the
+    latest cycle. Start matches the window ``_qualifying_payment_credit_sum``
+    uses; end bounds the panel so a past cycle does not sweep in a later
+    cycle's payments.
+    """
+    created_at = upload.created_at or datetime.now(timezone.utc)
+    start = created_at.date()
+
+    later = (
+        (
+            await session.execute(
+                select(StatementUpload.created_at)
+                .where(
+                    StatementUpload.account_id == upload.account_id,
+                    StatementUpload.created_at > created_at,
+                )
+                .order_by(StatementUpload.created_at.asc())
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    end = later.date() if later is not None else None
+    return start, end
+
+
+async def _settled_payments(
+    session: AsyncSession, upload: StatementUpload, start: date, end: date | None
+) -> list[SettledPayment]:
+    """Real credit transactions that count toward this cycle's paid amount.
+
+    Mirrors ``_qualifying_payment_credit_sum``: credit rows the classifier calls
+    a CC bill-payment, in the cycle. A row dated on/after the cycle start counts;
+    a row with no ``transaction_date`` counts when its ``created_at`` is on/after
+    the statement's generation timestamp (so a date-less payment still appears
+    here, matching the paid-amount sum). ``end`` bounds the upper edge so a past
+    cycle does not sweep in a later cycle's payments.
+    """
+    created_at = upload.created_at or datetime.now(timezone.utc)
+    date_in_cycle = Transaction.transaction_date >= start
+    if end is not None:
+        date_in_cycle = date_in_cycle & (Transaction.transaction_date < end)
+    null_date_in_cycle = Transaction.transaction_date.is_(None) & (
+        Transaction.created_at >= created_at
+    )
+
+    rows = (
+        (
+            await session.execute(
+                select(Transaction)
+                .where(
+                    Transaction.account_id == upload.account_id,
+                    Transaction.direction == "credit",
+                    date_in_cycle | null_date_in_cycle,
+                )
+                .order_by(Transaction.transaction_date.asc(), Transaction.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    settled: list[SettledPayment] = []
+    for row in rows:
+        if not is_cc_payment_received_email(row.email_type):
+            continue
+        settled.append(
+            SettledPayment(
+                txn_id=row.id,
+                date=row.transaction_date.isoformat() if row.transaction_date else "",
+                amount=_fmt_amount(row.amount),
+                counterparty=row.counterparty or "",
+            )
+        )
+    return settled
+
+
+async def _pending_payments(
+    session: AsyncSession,
+    upload: StatementUpload,
+    start: date,
+    end: date | None,
+    settled: list[SettledPayment],
+) -> list[PendingPayment]:
+    """Provisional bill-payment SMS for this card, not yet in the ledger.
+
+    Fetches the account's unlinked SMS in the cycle window, then re-parses each
+    body. Keeps only the ones the parser calls a provisional credit that the
+    classifier reads as a CC bill-payment. Re-parsing is required: the parser's
+    ledger role is not stored on the SMS row. The candidate set is small (one
+    card's unlinked SMS in one cycle), so parsing on page load is cheap.
+
+    A provisional whose real settlement already landed must NOT show as pending.
+    The settlement is a different SMS linked to its own credit row, so the
+    provisional stays unlinked. Suppress a provisional by cancelling it against
+    an already-settled credit of the same amount: each settled credit consumes
+    one equal-amount provisional. Without this the panel shows a phantom pending
+    payment, and settling it would double-count.
+    """
+    account = await session.get(Account, upload.account_id)
+    if account is None:
+        return []
+
+    # ``received_at`` is UTC; the cycle bounds are calendar dates whose real
+    # day is IST. A payment near IST-midnight is stored on the adjacent UTC
+    # date, so a tight UTC-midnight window would drop it. Pad the window by a
+    # day on each edge to cover the ~5.5h skew. Over-inclusion is safe: a
+    # provisional pulled in from an adjacent cycle is still cancelled by the
+    # settled budget, filtered by card, and requires ``transaction_id IS NULL``;
+    # the worst case is showing a genuinely-unsettled neighbour payment, which
+    # settling attributes to the correct cycle anyway.
+    lower = datetime.combine(
+        start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+    )
+    conditions = [
+        SmsMessage.bank == account.bank,
+        SmsMessage.transaction_id.is_(None),
+        SmsMessage.received_at >= lower,
+    ]
+    if end is not None:
+        upper = datetime.combine(
+            end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        )
+        conditions.append(SmsMessage.received_at < upper)
+
+    rows = (
+        (
+            await session.execute(
+                select(SmsMessage)
+                .where(*conditions)
+                .order_by(SmsMessage.received_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Budget of already-settled credit amounts. A provisional matching a
+    # remaining budget entry is treated as settled and hidden.
+    settled_budget: dict[str, int] = {}
+    for row in settled:
+        settled_budget[row.amount] = settled_budget.get(row.amount, 0) + 1
+
+    pending: list[PendingPayment] = []
+    for sms in rows:
+        parsed = _parse_provisional_cc_payment(sms)
+        if parsed is None:
+            continue
+        txn_data, ledger_role = parsed
+        # Only true provisionals settle here. A restatement echoes a payment
+        # another message already carries, so it must not become a ledger row.
+        if ledger_role != "provisional":
+            continue
+        if not is_cc_payment_received_email(txn_data.get("email_type")):
+            continue
+        # A provisional SMS for a DIFFERENT card on the same bank must not show
+        # here. Confirm the parsed card belongs to this account's card set.
+        if not _card_belongs_to_account(txn_data.get("card_mask"), account):
+            continue
+
+        amount = _fmt_amount(txn_data["amount"])
+        if settled_budget.get(amount, 0) > 0:
+            # The real settlement for this payment already landed; consume the
+            # budget entry and hide the provisional.
+            settled_budget[amount] -= 1
+            continue
+
+        txn_date = txn_data.get("transaction_date")
+        balance = txn_data.get("balance")
+        pending.append(
+            PendingPayment(
+                sms_id=sms.id,
+                amount=amount,
+                date=txn_date.isoformat() if txn_date else "",
+                card_mask=txn_data.get("card_mask") or "",
+                available_limit=_fmt_amount(balance) if balance is not None else None,
+            )
+        )
+    return pending
+
+
+def _parse_provisional_cc_payment(sms: SmsMessage):
+    """Re-parse one SMS. Return ``(txn_data, ledger_role)`` or ``None``.
+
+    Side-effect free. Swallows parser errors: a body that no longer parses is
+    simply not a pending payment.
+    """
+    received_at = sms.received_at
+    if received_at is not None and received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=timezone.utc)
+    try:
+        parsed = parse_sms(
+            sms.bank, sms.body, sender=sms.sender, received_at=received_at
+        )
+    except ParseError, UnsupportedSmsTypeError:
+        return None
+
+    txn_data = parsed_sms_to_txn_data(parsed, sms)
+    if txn_data is None or txn_data.get("direction") != "credit":
+        return None
+    return txn_data, parsed.ledger_role
+
+
+def _account_masks(account: Account) -> list[str]:
+    masks = [account.account_number or ""]
+    masks.extend(card.card_mask or "" for card in getattr(account, "cards", []) or [])
+    return masks
+
+
+def _card_belongs_to_account(
+    card_mask: str | None, account: Account, *, strict: bool = False
+) -> bool:
+    """True if a parsed card mask matches this account or one of its cards.
+
+    ``strict=False`` (display path): a missing or unreadable mask is treated as
+    belonging. The pipeline resolves such rows to the single-CC account anyway,
+    and excluding them would hide a real pending payment.
+
+    ``strict=True`` (settle path): a missing or unreadable mask must NOT match
+    an arbitrary account — settling creates a real credit. Such a mask is
+    accepted only when the account has exactly one known card mask (a single-CC
+    account where the payment unambiguously belongs), and rejected otherwise.
+    """
+    readable = [
+        m4
+        for m in _account_masks(account)
+        if (m4 := "".join(ch for ch in m if ch.isdigit())[-4:])
+    ]
+    last4 = "".join(ch for ch in (card_mask or "") if ch.isdigit())[-4:]
+    if not last4:
+        if not strict:
+            return True
+        # Strict: accept a maskless payment only for an unambiguous single card.
+        return len(set(readable)) == 1
+    return last4 in readable
+
+
+async def is_settleable_provisional(
+    session: AsyncSession, sms: SmsMessage, upload: StatementUpload
+) -> bool:
+    """True if ``sms`` is a provisional CC bill-payment for ``upload``'s account.
+
+    The settle route accepts a raw SMS id from the form, so it must confirm the
+    SMS really is a provisional CC-payment credit for this statement's card
+    before promoting it. This rejects a restatement, a non-payment SMS, a
+    different card, or an arbitrary id. It does NOT re-check the cycle window:
+    settling a slightly out-of-window provisional the user can see is harmless
+    and the paid-amount recompute scopes the credit to the right cycle anyway.
+    """
+    if sms.transaction_id is not None:
+        return False
+    account = await session.get(Account, upload.account_id)
+    if account is None or account.type != "credit_card":
+        return False
+    if sms.bank != account.bank:
+        return False
+    parsed = _parse_provisional_cc_payment(sms)
+    if parsed is None:
+        return False
+    txn_data, ledger_role = parsed
+    if ledger_role != "provisional":
+        return False
+    if not is_cc_payment_received_email(txn_data.get("email_type")):
+        return False
+    return _card_belongs_to_account(txn_data.get("card_mask"), account, strict=True)
+
+
+async def build_payments_view(
+    session: AsyncSession, upload: StatementUpload
+) -> PaymentsView:
+    """Assemble the Payments panel view-model for one CC statement.
+
+    Returns empty settled/pending and no remaining when the statement has no
+    parseable total due (the panel then renders only what it can).
+    """
+    start, end = await _cycle_bounds(session, upload)
+    settled = await _settled_payments(session, upload, start, end)
+    pending = await _pending_payments(session, upload, start, end, settled)
+
+    remaining: str | None = None
+    if upload.total_amount_due is not None:
+        try:
+            amount_due = parse_cc_amount(upload.total_amount_due)
+        except ValueError, InvalidOperation:
+            amount_due = None
+        if amount_due is not None:
+            paid = Decimal(str(upload.payment_paid_amount or 0))
+            remaining = _fmt_amount(max(amount_due - paid, Decimal("0")))
+
+    return PaymentsView(settled=settled, pending=pending, remaining=remaining)
