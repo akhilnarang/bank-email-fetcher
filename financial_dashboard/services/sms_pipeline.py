@@ -119,6 +119,7 @@ async def process_sms_row(
     link_context: LinkContext,
     *,
     force_new: bool = False,
+    settle_provisional: bool = False,
 ) -> ProcessSmsOutcome:
     """Parse one ``SmsMessage`` and merge into Transaction.
 
@@ -129,6 +130,13 @@ async def process_sms_row(
     ``force_new=True`` (manual "Parse" of a [dup-defer] row) bypasses the
     duplicate matcher and forces a new transaction; idempotent on a row
     already linked to a transaction.
+
+    ``settle_provisional=True`` (manual "Settle" of a provisional bill-payment
+    SMS) skips the notify-only pre-gate for THIS row, so the provisional credit
+    flows through the normal create path and becomes a real Transaction. The
+    bank's own settlement message never arrived; the user asserts the payment
+    is real. Every downstream step (merge, link, account resolution, paid-amount
+    recompute) is the same as for a bank-sent settlement.
     """
     now = datetime.datetime.now(datetime.UTC)
     sms_row.parsed_at = now
@@ -188,7 +196,16 @@ async def process_sms_row(
     # (hypothetical) non-credit shape of such a role falls through instead of
     # being swallowed. Reading the role off ``parsed`` keeps it out of the
     # ``txn_data`` dict, which is unpacked directly into a Transaction row.
-    if parsed.ledger_role in NOTIFY_ONLY_ROLES and txn_data["direction"] == "credit":
+    # ``settle_provisional`` lifts the gate ONLY for a provisional credit — the
+    # manual "Settle" case. A restatement stays notify-only even with the flag:
+    # it echoes a payment another message carries, so promoting it would
+    # duplicate a real credit.
+    gate_bypassed = settle_provisional and parsed.ledger_role == "provisional"
+    if (
+        not gate_bypassed
+        and parsed.ledger_role in NOTIFY_ONLY_ROLES
+        and txn_data["direction"] == "credit"
+    ):
         sms_row.status = "parsed"
         # Notify-only makes no NEW row, but must not orphan an old one. A
         # reparse of a message that produced a row under an earlier parser

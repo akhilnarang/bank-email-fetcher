@@ -35,6 +35,7 @@ from financial_dashboard.db import (
     EmailSource,
     FetchRule,
     PaymentStatus,
+    SmsMessage,
     StatementUpload,
     Transaction,
 )
@@ -49,6 +50,7 @@ from financial_dashboard.services.accounts import (
     retry_password_required_statements as accounts_retry_password_required_statements,
 )
 from financial_dashboard.services.reminders import init_payment_tracking
+from financial_dashboard.services.statement_payments import build_payments_view
 from financial_dashboard.services.snapshots import emit_cc_snapshot
 from financial_dashboard.services.statements.bank import process_bank_statement_email
 from financial_dashboard.services.statements.cc import (
@@ -353,6 +355,12 @@ async def statement_detail(
         person_groups = group_recon_by_person(recon)
         card_summaries = recon.get("card_summaries", [])
 
+    # Payments panel: paid/remaining, settled credits, and provisional SMS not
+    # yet in the ledger. Only meaningful for CC statements with a due date.
+    payments = None
+    if upload.account_id is not None and upload.payment_status is not None:
+        payments = await build_payments_view(session, upload)
+
     return templates.TemplateResponse(
         request,
         "statement_reconcile.html",
@@ -362,6 +370,7 @@ async def statement_detail(
             "recon": recon,
             "person_groups": person_groups,
             "card_summaries": card_summaries,
+            "payments": payments,
             "error": request.query_params.get("error"),
         },
     )
@@ -527,6 +536,85 @@ async def statement_payment(
             await session.commit()
 
     return RedirectResponse(url="/statements", status_code=303)
+
+
+@router.post("/statements/{upload_id}/settle-sms/{sms_id}")
+async def statement_settle_sms(
+    upload_id: int,
+    sms_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Promote a provisional bill-payment SMS into a real credit transaction.
+
+    HDFC (and others) send a "payment received" SMS the pipeline treats as
+    notify-only: it makes no ledger row and waits for the bank's settlement
+    message. When that settlement never arrives, the user settles the payment
+    by hand here. The SMS flows through the normal create path (``process_sms_row``
+    with ``settle_provisional=True``), which recomputes the cycle's paid amount.
+    """
+    from financial_dashboard.services.linker import build_link_context
+    from financial_dashboard.services.sms_pipeline import process_sms_row
+    from financial_dashboard.services.statement_payments import (
+        is_settleable_provisional,
+    )
+
+    def _fail(msg: str) -> RedirectResponse:
+        return RedirectResponse(
+            url=f"/statements/{upload_id}?{urlencode({'error': msg})}",
+            status_code=303,
+        )
+
+    def _refresh() -> RedirectResponse:
+        return RedirectResponse(url=f"/statements/{upload_id}", status_code=303)
+
+    upload = await session.get(StatementUpload, upload_id)
+    if not upload:
+        return RedirectResponse(url="/statements", status_code=303)
+
+    sms = await session.get(SmsMessage, sms_id)
+    if sms is None:
+        return _fail("Payment SMS not found.")
+    if sms.transaction_id is not None:
+        # Already settled (or the bank's own settlement landed first). The
+        # pending panel derives from unlinked SMS, so this is a stale re-submit;
+        # send the user back to the refreshed page without a second row.
+        return _refresh()
+
+    # Close the implicit read txn from the get() calls before the explicit
+    # begin() below, mirroring reparse_sms.
+    await session.rollback()
+
+    async with session.begin():
+        sms = await session.get(SmsMessage, sms_id)
+        if sms is None:
+            return _fail("Payment SMS not found.")
+        # Re-check the link INSIDE the write transaction: a concurrent submit
+        # may have settled this SMS between the pre-check and here. Bailing now
+        # avoids a second credit row (and the defer path orphaning the link).
+        if sms.transaction_id is not None:
+            return _refresh()
+        # The form supplies a raw SMS id. Confirm it is genuinely a provisional
+        # CC-payment for this statement's card before promoting it, so a
+        # restatement / non-payment / wrong-card / arbitrary id cannot create a
+        # spurious credit.
+        if not await is_settleable_provisional(session, sms, upload):
+            return _fail("That SMS is not a settleable pending payment.")
+        link_ctx = await build_link_context(session)
+        outcome = await process_sms_row(session, sms, link_ctx, settle_provisional=True)
+
+    if outcome.status == "error":
+        return _fail(sms.parse_error or "Could not parse the payment SMS.")
+
+    # Recompute the cycle's paid amount, same hook as a bank-sent settlement.
+    if outcome.pending_payment_check is not None:
+        from financial_dashboard.services.reminders import check_payment_received
+
+        try:
+            await check_payment_received(*outcome.pending_payment_check)
+        except Exception as exc:
+            logger.warning("Settle payment-received check failed: %s", exc)
+
+    return RedirectResponse(url=f"/statements/{upload_id}", status_code=303)
 
 
 @router.post("/statements/{upload_id}/reprocess")
