@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     "pydantic-settings>=2.14.2,<3",
-    "rich>=14.0,<15",
+    "rich>=14.0,<16",
     "uvicorn[standard]>=0.34,<1",
     "jinja2>=3.1,<4",
     "sqlalchemy[asyncio]>=2.0,<3",
@@ -20,11 +20,11 @@ dependencies = [
     "cas-parser",
     "cc-parser",
     "fastapi[standard]>=0.135,<1",
-    "cryptography>=48.0.1,<49",
+    "cryptography>=49.0.0,<51",
     "python-telegram-bot>=22.7,<23",
     "python-dateutil>=2.9.0.post0",
-    "google-genai>=1.75,<2",
-    "openai>=1.109,<2",
+    "google-genai>=1.75,<3",
+    "openai>=1.109,<4",
 ]
 
 [build-system]
