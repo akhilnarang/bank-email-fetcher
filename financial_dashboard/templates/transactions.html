@@ -5,20 +5,17 @@
 <style>
     .transactions-filter {
         display: grid;
-        grid-template-columns:
-            minmax(7.5rem, 0.75fr)
-            minmax(13rem, 1.35fr)
-            minmax(15rem, 1.55fr)
-            minmax(7rem, 0.65fr)
-            minmax(9.5rem, 0.8fr)
-            minmax(9.5rem, 0.8fr)
-            minmax(0, 1fr)
-            2.6rem;
+        grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
         align-items: end;
         gap: 0.75rem;
         border-radius: 12px;
         padding: 1rem 1.1rem;
         margin-bottom: 0;
+    }
+    /* Hidden inputs must not occupy a grid track, or they shift the
+       visible fields into the wrong columns. */
+    .transactions-filter input[type="hidden"] {
+        display: none;
     }
     .transactions-filter label[data-field] {
         min-width: 0;
@@ -36,9 +33,8 @@
         white-space: nowrap;
     }
     .filter-clear {
-        grid-column: -2 / -1;
         align-self: end;
-        justify-self: end;
+        justify-self: start;
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -88,21 +84,9 @@
     .table.transactions-table {
         overflow-x: auto;
     }
-    @media (max-width: 1200px) {
-        .transactions-filter {
-            grid-template-columns: repeat(3, minmax(10rem, 1fr));
-        }
-        .filter-clear {
-            grid-column: -2 / -1;
-        }
-    }
     @media (max-width: 700px) {
         .transactions-filter {
             grid-template-columns: 1fr;
-        }
-        .filter-clear {
-            grid-column: 1;
-            justify-self: end;
         }
     }
 </style>
