@@ -38,6 +38,7 @@ from financial_dashboard.services.reminders import (
 pytestmark = pytest.mark.anyio
 
 CYCLE_CREATED = dt.datetime(2026, 5, 10, 8, 0, tzinfo=dt.UTC)
+NEXT_CYCLE_CREATED = dt.datetime(2026, 6, 10, 8, 0, tzinfo=dt.UTC)
 
 
 @pytest.fixture
@@ -65,7 +66,9 @@ async def _cc_account(session) -> Account:
     return account
 
 
-async def _upload(session, account, total_due="10000.00") -> StatementUpload:
+async def _upload(
+    session, account, total_due="10000.00", created_at=CYCLE_CREATED
+) -> StatementUpload:
     upload = StatementUpload(
         account_id=account.id,
         bank=account.bank,
@@ -76,7 +79,7 @@ async def _upload(session, account, total_due="10000.00") -> StatementUpload:
         total_amount_due=total_due,
         payment_status=PaymentStatus.UNPAID,
         payment_paid_amount=Decimal("0"),
-        created_at=CYCLE_CREATED,
+        created_at=created_at,
     )
     session.add(upload)
     await session.flush()
@@ -229,6 +232,75 @@ async def test_null_date_row_from_prior_cycle_does_not_leak(session_maker):
         upload = (await s.execute(select(StatementUpload))).scalar_one()
         # Only the in-cycle 1000 counts; the stale NULL-date 5000 is excluded.
         assert upload.payment_paid_amount == Decimal("1000.00")
+
+
+async def test_boundary_dated_payment_lands_in_next_cycle_only(session_maker):
+    """A payment contributes to exactly one cycle's paid amount. A payment dated
+    the next statement's generation day belongs to the NEXT cycle, not the old
+    one and not both; a payment dated mid-way through the old cycle belongs to
+    the old one, not the new one."""
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        old = await _upload(s, account, created_at=CYCLE_CREATED)
+        newer = await _upload(s, account, created_at=NEXT_CYCLE_CREATED)
+        s.add(_credit(account, "1000.00", txn_date=NEXT_CYCLE_CREATED.date()))
+        s.add(_credit(account, "2000.00", txn_date=dt.date(2026, 5, 20)))
+        await s.flush()
+
+        old_paid = await recompute_cc_payment_state(s, old)
+        newer_paid = await recompute_cc_payment_state(s, newer)
+        assert old_paid == Decimal("2000.00")
+        assert newer_paid == Decimal("1000.00")
+
+
+async def test_null_date_payment_within_old_cycle_counts_in_old_only(session_maker):
+    """A date-less payment whose created_at falls before the next statement
+    belongs to the old cycle only. The later statement must neither drop it from
+    the old cycle nor pull it into the new one."""
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        old = await _upload(s, account, created_at=CYCLE_CREATED)
+        newer = await _upload(s, account, created_at=NEXT_CYCLE_CREATED)
+        s.add(
+            _credit(
+                account,
+                "1500.00",
+                txn_date=None,
+                created_at=dt.datetime(2026, 5, 12, tzinfo=dt.UTC),
+            )
+        )
+        await s.flush()
+
+        old_paid = await recompute_cc_payment_state(s, old)
+        newer_paid = await recompute_cc_payment_state(s, newer)
+        assert old_paid == Decimal("1500.00")
+        assert newer_paid == Decimal("0.00")
+
+
+async def test_null_date_payment_after_next_statement_counts_in_next_only(
+    session_maker,
+):
+    """A date-less payment whose created_at falls after the next statement
+    belongs to the next cycle only. Bounding the null branch by created_at keeps
+    it from double-counting into the old cycle as well."""
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        old = await _upload(s, account, created_at=CYCLE_CREATED)
+        newer = await _upload(s, account, created_at=NEXT_CYCLE_CREATED)
+        s.add(
+            _credit(
+                account,
+                "1500.00",
+                txn_date=None,
+                created_at=dt.datetime(2026, 6, 12, tzinfo=dt.UTC),
+            )
+        )
+        await s.flush()
+
+        old_paid = await recompute_cc_payment_state(s, old)
+        newer_paid = await recompute_cc_payment_state(s, newer)
+        assert old_paid == Decimal("0.00")
+        assert newer_paid == Decimal("1500.00")
 
 
 async def test_paid_at_preserved_on_repeat_recompute(session):

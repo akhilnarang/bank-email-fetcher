@@ -261,6 +261,74 @@ async def test_two_provisionals_one_settled_leaves_one_pending(maker):
     assert len(view.pending) == 1
 
 
+async def _seed_second_statement(maker, acc_id, *, created_at, total="50,000.00"):
+    """A later statement for the SAME account, opening the next cycle."""
+    async with maker() as session:
+        upload = StatementUpload(
+            account_id=acc_id,
+            bank="hdfc",
+            filename="cc2.pdf",
+            file_path="/tmp/cc2.pdf",
+            status="imported",
+            due_date="25/09/2026",
+            total_amount_due=total,
+            payment_status=PaymentStatus.UNPAID,
+            payment_paid_amount=Decimal("0"),
+            created_at=created_at,
+        )
+        session.add(upload)
+        await session.commit()
+        return upload.id
+
+
+async def _add_null_date_credit(maker, acc_id, *, amount, created_at):
+    """A date-less real CC-payment credit with a controlled created_at."""
+    async with maker() as session:
+        txn = Transaction(
+            account_id=acc_id,
+            bank="hdfc",
+            email_type="hdfc_cc_payment_received_alert",
+            direction="credit",
+            amount=Decimal(str(amount)),
+            transaction_date=None,
+            counterparty="Payment",
+        )
+        txn.created_at = created_at
+        session.add(txn)
+        await session.commit()
+        return txn.id
+
+
+@pytest.mark.anyio
+async def test_null_date_credit_bounded_to_its_cycle_by_created_at(maker):
+    """A date-less settled credit created after the next statement shows in the
+    NEXT cycle's settled list only, never the old one. The old cycle bounds
+    date-less rows by ``created_at`` (< the next statement's ``created_at``), so
+    it does not double-count."""
+    old_id, acc_id = await _seed_open_statement(maker)  # created 2026-08-06
+    newer_id = await _seed_second_statement(
+        maker,
+        acc_id,
+        created_at=datetime.datetime(2026, 9, 6, 6, 20, tzinfo=datetime.UTC),
+    )
+    await _add_null_date_credit(
+        maker,
+        acc_id,
+        amount="30000.00",
+        created_at=datetime.datetime(2026, 9, 10, 6, 0, tzinfo=datetime.UTC),
+    )
+
+    old_upload = await _get_upload(maker, old_id)
+    newer_upload = await _get_upload(maker, newer_id)
+    async with maker() as session:
+        old_view = await build_payments_view(session, old_upload)
+        newer_view = await build_payments_view(session, newer_upload)
+
+    assert old_view.settled == []
+    assert len(newer_view.settled) == 1
+    assert newer_view.settled[0].amount == "30,000.00"
+
+
 @pytest.mark.anyio
 async def test_is_settleable_rejects_non_provisional(maker):
     """The settle validator rejects a non-payment SMS and a wrong-bank SMS."""

@@ -340,19 +340,60 @@ async def handle_mark_paid_callback(update, context) -> None:
         pass
 
 
+async def _next_statement_created_at(
+    session, upload: StatementUpload
+) -> datetime | None:
+    """Return the next statement's ``created_at`` for the same account.
+
+    Return ``None`` when ``upload`` is the account's latest cycle. This
+    timestamp is the open upper edge of ``upload``'s cycle. A credit that
+    belongs on/after it belongs to the next cycle, not this one.
+    """
+    created_at = upload.created_at or datetime.now(timezone.utc)
+    later = (
+        (
+            await session.execute(
+                select(StatementUpload.created_at)
+                .where(
+                    StatementUpload.account_id == upload.account_id,
+                    StatementUpload.created_at > created_at,
+                )
+                .order_by(StatementUpload.created_at.asc())
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    return later
+
+
 async def _qualifying_payment_credit_sum(session, upload: StatementUpload) -> Decimal:
     """Sum the CC bill-payment credits that belong to ``upload``'s cycle.
 
-    Cycle scope is "this statement's generation date onward": a credit
-    counts when its ``transaction_date`` is on/after ``upload.created_at``'s
-    calendar date. The comparison is on DATE (not datetime) so a payment
-    dated the same calendar day the statement was generated is INCLUDED.
+    The cycle is the half-open date range ``[start, end)``. ``start`` is this
+    statement's ``created_at`` date. ``end`` is the next statement's
+    ``created_at`` date for the same account, or open when this is the latest
+    cycle. ``created_at`` is the ingestion timestamp, used as a proxy for the
+    bank's statement-generation date (the parser does not yet emit a real
+    statement date). A dated credit counts when its ``transaction_date`` is
+    on/after ``start`` and, while a next statement exists, strictly before
+    ``end``. The comparison is on DATE. So a payment dated this statement's own
+    ``created_at`` day counts here, and a payment dated the next statement's
+    ``created_at`` day counts in the NEXT cycle only. Without the upper bound a
+    payment on that boundary day is summed into both cycles and overstates each
+    cycle's paid amount.
 
     A row with ``transaction_date IS NULL`` (digital alerts whose date isn't
     parsed get it filled from received_at upstream, so this is unusual) counts
-    only when the row's own ``created_at`` is on/after the cycle start. Without
-    that bound a single NULL-date payment would be summed into this cycle AND
-    every later one, overstating paid and understating outstanding.
+    when the row's own ``created_at`` falls in the cycle: on/after this
+    statement's ``created_at`` and, while a next statement exists, strictly
+    before the next statement's ``created_at``. The upper bound is on
+    ``created_at`` (a datetime), not ``transaction_date``: a NULL
+    ``transaction_date`` makes a ``transaction_date < end`` guard evaluate to
+    unknown and drop the row. The datetime bound pins each date-less credit to
+    exactly one cycle. The panel's settled-payment window applies the same two
+    bounds.
 
     ``is_cc_payment_received_email`` is a Python suffix check that can't be
     expressed cleanly in SQL, so we fetch the candidate credit rows for the
@@ -362,6 +403,19 @@ async def _qualifying_payment_credit_sum(session, upload: StatementUpload) -> De
     """
     created_at = upload.created_at or datetime.now(timezone.utc)
     cycle_start = created_at.date()
+    next_created = await _next_statement_created_at(session, upload)
+
+    dated_in_cycle = Transaction.transaction_date >= cycle_start
+    null_date_in_cycle = Transaction.transaction_date.is_(None) & (
+        Transaction.created_at >= created_at
+    )
+    if next_created is not None:
+        dated_in_cycle = dated_in_cycle & (
+            Transaction.transaction_date < next_created.date()
+        )
+        null_date_in_cycle = null_date_in_cycle & (
+            Transaction.created_at < next_created
+        )
 
     rows = (
         (
@@ -369,11 +423,7 @@ async def _qualifying_payment_credit_sum(session, upload: StatementUpload) -> De
                 select(Transaction).where(
                     Transaction.account_id == upload.account_id,
                     Transaction.direction == "credit",
-                    (Transaction.transaction_date >= cycle_start)
-                    | (
-                        (Transaction.transaction_date.is_(None))
-                        & (Transaction.created_at >= created_at)
-                    ),
+                    dated_in_cycle | null_date_in_cycle,
                 )
             )
         )
