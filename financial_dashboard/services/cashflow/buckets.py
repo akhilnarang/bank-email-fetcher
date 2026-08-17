@@ -36,7 +36,10 @@ logger = logging.getLogger(__name__)
 # of a slug that vocabulary already names.
 TRANSFERS_IN_SLUG = REPAYMENT_SLUG
 SELF_TRANSFER_SLUG = "self_transfer"
-CONTRA_EXPENSE_SLUGS = frozenset({"refund", "cashback_rewards"})
+# Family members' spending routed through the owner's cards, and the repayments.
+FAMILY_SLUG = "family"
+# Credits that reduce spend rather than count as income.
+CONTRA_EXPENSE_SLUGS = frozenset({"refund", "cashback_rewards", "reimbursement"})
 INTERNAL_SLUGS = frozenset({SELF_TRANSFER_SLUG, CREDIT_CARD_PAYMENT_SLUG})
 # Over the bank, a card bill is spend, so the only movement left that is internal
 # to the perimeter is money the owner sent themselves.
@@ -63,6 +66,7 @@ BUCKET_BY_SLUG: dict[str, str] = {
     **{s: "investment" for s in INVESTMENT_BUCKET},
     **{s: "internal" for s in INTERNAL_SLUGS},
     TRANSFERS_IN_SLUG: "transfers_in",
+    FAMILY_SLUG: "family",
 }
 
 LABEL_OVERRIDES = {
@@ -83,8 +87,9 @@ def bucket_for_slug(slug: str | None, *, scope: Scope | None = None) -> str:
     """Name the report bucket a category slug belongs on, under an account scope.
 
     Returns one of ``income``, ``expense``, ``investment``, ``transfers_in``,
-    ``internal`` or ``uncategorized``. Every slug resolves to a bucket — there is
-    no failure mode, because a row the report cannot place must still be shown:
+    ``family``, ``internal`` or ``uncategorized``. Every slug resolves to a
+    bucket — there is no failure mode, because a row the report cannot place must
+    still be shown:
 
     * ``None``, the empty string and the ``unknown`` sentinel are the *expected*
       absence of a category, so they short-circuit to ``uncategorized`` before

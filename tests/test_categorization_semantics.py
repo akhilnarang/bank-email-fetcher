@@ -101,10 +101,14 @@ def _f(
 
 def test_contra_expense_slugs_are_pinned():
     """The cashflow bucket map's contra-expense set is named once: refund and
-    cashback_rewards are income-guard slugs re-homed to expense, while a credit
-    fees_charges is the explicit fee-reversal path. A change to either side of
-    that union is a change to which credits net against spend."""
-    assert CONTRA_EXPENSE_SLUGS == frozenset({"refund", "cashback_rewards"})
+    cashback_rewards are income-guard slugs re-homed to expense; reimbursement is
+    a paid-back shared expense (a friend's dinner share, an employer claim, a
+    family member's card spend); a credit fees_charges is the explicit
+    fee-reversal path. A change to either side of that union is a change to which
+    credits net against spend."""
+    assert CONTRA_EXPENSE_SLUGS == frozenset(
+        {"refund", "cashback_rewards", "reimbursement"}
+    )
     # fees_charges is in EXPENSE_SLUGS, NOT in CONTRA_EXPENSE_SLUGS — the
     # contra path for it is the rules layer's fee-reversal evidence, not a
     # blanket bucket-map re-homing.

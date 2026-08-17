@@ -24,6 +24,7 @@ account Expenses:Education
 account Expenses:Emi Loan
 account Expenses:Entertainment
 account Expenses:Expense
+account Expenses:Family
 account Expenses:Fees Charges
 account Expenses:Fuel
 account Expenses:Gift
@@ -32,6 +33,7 @@ account Expenses:Healthcare
 account Expenses:Insurance:Medical Health Insurance Premium
 account Expenses:Misc
 account Expenses:Personal Care
+account Expenses:Reimbursement
 account Expenses:Rent
 account Expenses:Shopping
 account Expenses:Tax

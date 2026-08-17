@@ -327,6 +327,57 @@ async def test_internal_footnote_count_agrees_with_its_drill(client, session):
     assert "5,000.00" not in bill_listing
 
 
+async def test_family_excluded_from_buckets_and_counted_in_its_footnote(
+    client, session
+):
+    """A `family` row is excluded from income and expense and counted only in the
+    family footnote, whose drill lists exactly those rows."""
+    # Decoy amounts are chosen so none is a substring of a family amount.
+    await _add(session, amount="40000", direction="credit", category="family")
+    await _add(session, amount="13000", direction="debit", category="family")
+    await _add(session, amount="90000", direction="credit", category="salary")
+    await _add(session, amount="6500", direction="debit", category="rent")
+
+    page = (await client.get(f"/cashflow?{RANGE}")).text
+
+    # Excluded from the money buckets entirely.
+    assert "Family" not in _region(page, "data-section", "income")
+    assert "Family" not in _region(page, "data-section", "expense")
+
+    # Counted in its own footnote: signed net +40,000 credit -13,000 debit.
+    row = _region(page, "data-footnote", "family")
+    assert f"category=family&amp;{RANGE_HTML}" in row
+    assert "₹27,000.00" in row
+
+    listing = await _listed(client, row)
+    assert listing.count(DETAIL) == _count(row) == 2
+    # The salary/rent decoys are not in the family drill.
+    assert "90,000.00" not in listing
+    assert "6,500.00" not in listing
+
+    # Family is not "internal": it must not inflate the internal footnote (that
+    # figure only holds self-transfers, which family flows are not).
+    assert _count(_region(page, "data-footnote", "internal")) == 0
+
+
+async def test_reimbursement_credit_nets_against_spend(client, session):
+    """A reimbursement credit reduces Spent (contra-expense) and is not income."""
+    await _add(session, amount="5000", direction="debit", category="dining")
+    await _add(session, amount="4000", direction="credit", category="reimbursement")
+    # An income decoy so the income section renders (to prove reimbursement is not
+    # in it).
+    await _add(session, amount="90000", direction="credit", category="salary")
+
+    page = (await client.get(f"/cashflow?{RANGE}")).text
+
+    expense = _region(page, "data-section", "expense")
+    # 5,000 spent minus 4,000 reimbursed nets to 1,000.
+    assert "₹1,000.00" in expense
+    assert "Reimbursement" in expense
+    # Not income.
+    assert "Reimbursement" not in _region(page, "data-section", "income")
+
+
 async def test_non_inr_footnote_count_agrees_with_its_drill(client, session):
     await _add(
         session, amount="100", direction="debit", category="rent", currency="USD"

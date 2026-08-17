@@ -12,6 +12,11 @@
     Assets:Bank:KotakSalary                         2916.11 INR
     ; note: synthetic account_credit_cashback_rewards
 
+2026-05-20 * FAMILY    ; txn:53ffab8aa258
+    Expenses:Family                                 1232.17 INR
+    Assets:Bank:KotakSalary                         -1232.17 INR
+    ; note: synthetic account_debit_family
+
 2026-05-21 * FREELANCE CLIENT    ; txn:50478a651ab6
     Income:Other Income                             -1486.77 INR
     Assets:Bank:KotakSalary                         1486.77 INR
@@ -211,6 +216,11 @@
     Assets:Bank:HDFCSalary                          14058.73 INR
     Assets:Bank:HDFCSavings                         -14058.73 INR
     ; note: synthetic account_credit_transfer
+
+2026-07-10 * REIMBURSEMENT    ; txn:4681c18e55a4
+    Expenses:Reimbursement                          5076.45 INR
+    Assets:Bank:HDFCSavings                         -5076.45 INR
+    ; note: synthetic account_debit_reimbursement
 
 2026-07-10 * SELF    ; txn:974f285e6137
     Assets:Bank:HDFCSalary                          14058.73 INR

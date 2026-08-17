@@ -63,6 +63,7 @@ from financial_dashboard.schemas.cashflow import (
 )
 from financial_dashboard.services.cashflow.buckets import (
     BUCKET_BY_SLUG,
+    FAMILY_SLUG,
     TRANSFERS_IN_SLUG,
     bucket_for_slug,
     internal_slugs_for_scope,
@@ -201,8 +202,10 @@ async def cashflow_summary(
     """Aggregate one inclusive ``transaction_date`` range into report buckets.
 
     Every figure on the returned summary is bank-scoped except ``expense_detail``,
-    which spans all accounts, and the unaccounted/undated footnotes, which exist
-    precisely to count what the bank scope leaves out.
+    which spans all accounts, the ``family`` footnote (all accounts, so a family
+    add-on-card swipe is counted alongside a family bank transfer), and the
+    unaccounted/undated footnotes, which exist precisely to count what the bank
+    scope leaves out.
     """
     in_range = Transaction.transaction_date.between(date_from, date_to)
 
@@ -485,6 +488,14 @@ async def _footnotes(session: AsyncSession, in_range: ColumnElement[bool]) -> Fo
             select(ROW_COUNT, SIGNED_FLOW).where(in_range, UNACCOUNTED_SCOPE)
         )
     ).one()
+    # Family rows are excluded from every bucket; count them here so they stay visible.
+    family_count, family_net = (
+        await session.execute(
+            select(ROW_COUNT, SIGNED_FLOW).where(
+                in_range, Transaction.category == FAMILY_SLUG
+            )
+        )
+    ).one()
     return Footnotes(
         internal_count=internal_count,
         internal_gross=_decimal(internal_gross),
@@ -494,6 +505,8 @@ async def _footnotes(session: AsyncSession, in_range: ColumnElement[bool]) -> Fo
         undated_net=_decimal(undated_net),
         unaccounted_count=unaccounted_count,
         unaccounted_net=_decimal(unaccounted_net),
+        family_count=family_count,
+        family_net=_decimal(family_net),
     )
 
 

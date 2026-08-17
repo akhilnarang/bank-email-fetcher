@@ -218,4 +218,6 @@ SEED_CATEGORY_SLUGS: tuple[str, ...] = (
     "gift",
     "misc",
     "unknown",
+    "family",
+    "reimbursement",
 )

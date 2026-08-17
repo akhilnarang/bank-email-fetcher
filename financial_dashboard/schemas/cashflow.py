@@ -191,15 +191,29 @@ class Footnotes(BaseModel):
             "figure — may mix currencies."
         ),
     )
+    family_count: int = Field(
+        description=(
+            "Rows categorized `family` in the range, over all accounts: money that "
+            "moved through the owner's accounts for a family member. Excluded from "
+            "every headline bucket."
+        ),
+    )
+    family_net: Decimal = Field(
+        description=(
+            "Signed net flow of the family rows (credits positive). A running family "
+            "position, not expected to net to zero. Rough figure; may mix currencies."
+        ),
+    )
 
 
 class CashflowSummary(BaseModel):
     """Every cashflow figure for one inclusive ``transaction_date`` range.
 
     Cash basis, scoped to the bank: income is what landed there and expense is
-    what left it, so a card bill is spend and a card swipe is not. The one
-    exception is ``expense_detail``, which spans every account on purpose and
-    answers a different question — see its own description.
+    what left it, so a card bill is spend and a card swipe is not. Two figures
+    span every account instead: ``expense_detail`` (see its own description) and
+    the ``family`` footnote, which counts a family member's card swipe alongside
+    their bank transfer.
     """
 
     date_from: datetime.date = Field(

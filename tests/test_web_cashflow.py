@@ -473,7 +473,7 @@ async def test_breakdown_hydrates_from_the_page_not_a_second_summary_query(
     """The breakdown draws the range the page already aggregated, so the summary is
     serialized into the page and the chart reads it there.
 
-    Re-fetching /api/cashflow/summary would be the same eight aggregate queries run a
+    Re-fetching /api/cashflow/summary would be the same aggregate queries run a
     second time to recompute figures that are already in this response, so the page
     must not carry that URL at all. The trend *is* fetched: its window is the
     trailing twelve months, which is not the selected range and so is genuinely not

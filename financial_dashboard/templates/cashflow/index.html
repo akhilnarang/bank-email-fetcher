@@ -93,7 +93,8 @@
 {% set activity = summary.income.count + summary.expense.count + summary.investment.count
                   + summary.transfers_in.count + summary.uncategorized.count
                   + summary.expense_detail.count
-                  + fn.internal_count + fn.non_inr_count + fn.unaccounted_count %}
+                  + fn.internal_count + fn.non_inr_count + fn.unaccounted_count
+                  + fn.family_count %}
 
 <div class="section-header">
     <div>
@@ -224,7 +225,7 @@
     {#- The summary this page was rendered from, serialized for the breakdown chart.
         The chart draws the selected range — the very range the tables above already
         show — so it hydrates from this payload instead of fetching
-        /api/cashflow/summary, which would re-run the same eight aggregate queries to
+        /api/cashflow/summary, which would re-run the same aggregate queries to
         recompute figures that are already in this response. -#}
     <script type="application/json" id="cf-summary">{{ summary.model_dump(mode="json")|tojson }}</script>
     <article class="card cf-chart-card" style="padding: 0.75rem;">
@@ -478,6 +479,14 @@
                         here would list bills this row never counted. -#}
                     <td><a href="/transactions?internal=1&amp;{{ bank_qs }}">Internal movements</a></td>
                     <td class="text-sm text-muted">{{ fn.internal_count }} txns &middot; self-transfers, in neither income nor expense &middot; gross {{ fn.internal_gross|inr_exact }} &middot; net {{ fn.internal_net|inr_exact }} (rough figure &mdash; may mix currencies)</td>
+                </tr>
+                <tr data-footnote="family">
+                    {#- Family rows span every account (a family member's card swipe as
+                        well as their bank transfer), so this drill carries the range
+                        only, no scope. Excluded from every headline bucket on purpose;
+                        the net is a running family position, not a term in any identity. -#}
+                    <td><a href="/transactions?category=family&amp;{{ range_qs }}">Family</a></td>
+                    <td class="text-sm text-muted">{{ fn.family_count }} txns &middot; family money that moved through your accounts &middot; not your income or spending &middot; net {{ fn.family_net|inr_exact }} (rough)</td>
                 </tr>
                 <tr data-footnote="non_inr">
                     <td><a href="/transactions?non_inr=1&amp;{{ bank_qs }}">Non-INR rows</a></td>

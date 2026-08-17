@@ -2,7 +2,7 @@
 
 The page renders every figure server-side from ``cashflow_summary``. If the
 breakdown chart then fetched ``/api/cashflow/summary``, the *same* range would be
-aggregated a second time — eight aggregate queries run twice over ``transactions``
+aggregated a second time — aggregate queries run twice over ``transactions``
 for numbers already in the HTML. These tests pin the cost so that regression
 cannot come back in quietly: they count the statements a request actually issues,
 rather than asserting on a comment about them.
@@ -27,9 +27,9 @@ pytestmark = pytest.mark.anyio
 RANGE = "date_from=2026-06-01&date_to=2026-06-30"
 
 # What the summary costs: the grouped bank-side bucket scan, the all-account
-# expense detail, transfers-in, uncategorized, and the four footnote reads
-# (internal, non-INR, undated, unaccounted).
-SUMMARY_QUERIES = 8
+# expense detail, transfers-in, uncategorized, and the five footnote reads
+# (internal, non-INR, undated, unaccounted, family).
+SUMMARY_QUERIES = 9
 # What the trend costs: the month/category/direction scan and the salary counts.
 TREND_QUERIES = 2
 
@@ -75,8 +75,8 @@ def count_transaction_reads():
 async def test_page_load_aggregates_the_range_once(client, session):
     """The page aggregates the selected range exactly once.
 
-    Eight queries, not sixteen: the breakdown chart is handed the summary the page
-    was rendered from instead of fetching it back.
+    The breakdown chart is handed the summary the page was rendered from instead
+    of fetching it back, so the range is not aggregated twice.
     """
     await _seed(session)
     with count_transaction_reads() as queries:
@@ -94,8 +94,8 @@ async def test_full_page_load_is_summary_plus_trend_and_nothing_more(client, ses
 
     The document is one summary; the only fetch it then makes is the trend, whose
     trailing-twelve-month window really is a different question from the selected
-    range. Ten aggregate queries in total — where a page that also re-fetched the
-    summary would spend eighteen.
+    range. A page that also re-fetched the summary would pay for a second full
+    summary.
     """
     await _seed(session)
     with count_transaction_reads() as page_queries:
@@ -106,12 +106,15 @@ async def test_full_page_load_is_summary_plus_trend_and_nothing_more(client, ses
 
     assert len(page_queries) == SUMMARY_QUERIES
     assert len(trend_queries) == TREND_QUERIES
-    assert len(page_queries) + len(trend_queries) == 10
+    assert len(page_queries) + len(trend_queries) == SUMMARY_QUERIES + TREND_QUERIES
 
     # The figure the removed fetch would have added back, measured rather than
     # asserted from memory: it is a second full summary.
     with count_transaction_reads() as summary_queries:
         await client.get(f"/api/cashflow/summary?{RANGE}")
     assert len(summary_queries) == SUMMARY_QUERIES
-    assert len(page_queries) + len(trend_queries) + len(summary_queries) == 18
+    assert (
+        len(page_queries) + len(trend_queries) + len(summary_queries)
+        == 2 * SUMMARY_QUERIES + TREND_QUERIES
+    )
     assert page.status_code == 200
