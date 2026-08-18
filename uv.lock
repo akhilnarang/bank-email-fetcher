@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "bank-statement-parser"
 version = "0.1.0"
-source = { git = "https://github.com/akhilnarang/bank-statement-parser#2b5ea49d6fc105f256cb215211e4b3236a1d928d" }
+source = { git = "https://github.com/akhilnarang/bank-statement-parser#0e04823b0d2f8d4fa00fdeda230461dac95fbbcd" }
 dependencies = [
     { name = "pdfplumber" },
     { name = "pydantic" },
