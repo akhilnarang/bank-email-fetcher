@@ -113,7 +113,9 @@
     <label data-field="date_to">To
         <input type="date" name="date_to" value="{{ date_to }}">
     </label>
-    <button type="submit" class="btn-action btn-primary">Apply</button>
+    {#- The date inputs apply on change (see cashflow.js), so no Apply button is
+        shown. Without JavaScript the form still needs a way to submit. -#}
+    <noscript><button type="submit" class="btn-action btn-primary">Apply</button></noscript>
     <span style="display: flex; gap: 0.3rem; flex-wrap: wrap; align-items: center;">
         {% for preset in presets %}
         <a class="btn-action btn-ghost" href="/cashflow?date_from={{ preset.date_from }}&amp;date_to={{ preset.date_to }}">{{ preset.label }}</a>

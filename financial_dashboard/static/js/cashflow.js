@@ -431,5 +431,18 @@ const breakdown = () => {
     onResize(svg, render);
 };
 
+// ---------------------------------------------------------------------------
+// Range picker: the two date inputs apply on change, so the bar needs no Apply
+// button. Without this script the form falls back to its <noscript> button.
+// ---------------------------------------------------------------------------
+const rangePicker = () => {
+    const form = document.querySelector("form.filter-bar");
+    if (!form) return;
+    form.querySelectorAll('input[type="date"]').forEach((input) => {
+        input.addEventListener("change", () => form.submit());
+    });
+};
+
 trend();
 breakdown();
+rangePicker();
