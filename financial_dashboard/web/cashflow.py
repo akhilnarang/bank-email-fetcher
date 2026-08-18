@@ -22,7 +22,12 @@ from fastapi import APIRouter, Depends, Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_dashboard.core.dates import DEFAULT_TREND_MONTHS, month_start
+from financial_dashboard.core.dates import (
+    DEFAULT_TREND_MONTHS,
+    financial_year_start,
+    month_start,
+    quarter_start,
+)
 from financial_dashboard.core.deps import get_session
 from financial_dashboard.core.templating import get_templates
 from financial_dashboard.services.cashflow.report import (
@@ -44,6 +49,10 @@ def _presets(today: datetime.date) -> list[dict[str, str]]:
     """
     this_month = month_start(today)
     last_month = month_start(today, 1)
+    this_quarter = quarter_start(today)
+    # A completed period ends on its own last day, not today.
+    last_month_end = this_month - datetime.timedelta(days=1)
+    last_quarter_end = this_quarter - datetime.timedelta(days=1)
     return [
         {
             "label": "This month",
@@ -53,17 +62,25 @@ def _presets(today: datetime.date) -> list[dict[str, str]]:
         {
             "label": "Last month",
             "date_from": last_month.isoformat(),
-            # The day before this month's first is the last day of last month,
-            # with no month-length special cases.
-            "date_to": (this_month - datetime.timedelta(days=1)).isoformat(),
+            "date_to": last_month_end.isoformat(),
         },
         {
-            "label": "Last 3 months",
-            "date_from": month_start(today, 2).isoformat(),
+            "label": "This quarter",
+            "date_from": this_quarter.isoformat(),
             "date_to": today.isoformat(),
         },
         {
-            "label": "This year",
+            "label": "Last quarter",
+            "date_from": quarter_start(last_quarter_end).isoformat(),
+            "date_to": last_quarter_end.isoformat(),
+        },
+        {
+            "label": "Financial year",
+            "date_from": financial_year_start(today).isoformat(),
+            "date_to": today.isoformat(),
+        },
+        {
+            "label": "Calendar year",
             "date_from": today.replace(month=1, day=1).isoformat(),
             "date_to": today.isoformat(),
         },

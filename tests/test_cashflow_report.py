@@ -635,3 +635,38 @@ async def test_trend_pre_seeds_every_month_so_empty_history_is_zeros_not_no_poin
         p.income == 0 and p.expense == 0 and p.net_invested == 0 and p.salary_count == 0
         for p in points
     )
+
+
+def test_presets_cover_month_quarter_and_year_ranges():
+    """The one-click ranges the filter bar shows, with concrete bounds.
+
+    A current period runs to today. A completed period (last month, last
+    quarter) runs to its own last day, not today.
+    """
+    from financial_dashboard.web.cashflow import _presets
+
+    presets = _presets(datetime.date(2026, 8, 18))
+
+    assert presets == [
+        {"label": "This month", "date_from": "2026-08-01", "date_to": "2026-08-18"},
+        {"label": "Last month", "date_from": "2026-07-01", "date_to": "2026-07-31"},
+        {"label": "This quarter", "date_from": "2026-07-01", "date_to": "2026-08-18"},
+        {"label": "Last quarter", "date_from": "2026-04-01", "date_to": "2026-06-30"},
+        {"label": "Financial year", "date_from": "2026-04-01", "date_to": "2026-08-18"},
+        {"label": "Calendar year", "date_from": "2026-01-01", "date_to": "2026-08-18"},
+    ]
+
+
+def test_january_presets_roll_the_financial_year_and_last_quarter_back():
+    """In January to March, the financial year and last quarter belong to the
+    previous calendar year."""
+    from financial_dashboard.web.cashflow import _presets
+
+    presets = {item["label"]: item for item in _presets(datetime.date(2026, 2, 15))}
+
+    assert presets["Financial year"]["date_from"] == "2025-04-01"
+    assert presets["Last quarter"] == {
+        "label": "Last quarter",
+        "date_from": "2025-10-01",
+        "date_to": "2025-12-31",
+    }

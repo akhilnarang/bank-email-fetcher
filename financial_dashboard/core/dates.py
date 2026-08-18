@@ -1,4 +1,4 @@
-"""Shared date parsing and calendar-month helpers backed by python-dateutil.
+"""Shared date parsing and calendar-period helpers backed by python-dateutil.
 
 The month helpers all take and return whole ``date`` objects and go through
 ``relativedelta``, so month-length and leap-year edges are handled in one place
@@ -28,6 +28,22 @@ def month_start(day: date, back: int = 0) -> date:
 def month_end(day: date) -> date:
     """The last day of ``day``'s month, whatever its length."""
     return day.replace(day=1) + relativedelta(months=1, days=-1)
+
+
+def quarter_start(day: date) -> date:
+    """The first day of the calendar quarter that contains ``day``."""
+    first_month = (day.month - 1) // 3 * 3 + 1
+    return day.replace(month=first_month, day=1)
+
+
+def financial_year_start(day: date) -> date:
+    """The first day of the Indian financial year that contains ``day``.
+
+    The financial year runs April to March. A day in January to March
+    belongs to the year that started the previous April.
+    """
+    year = day.year if day.month >= 4 else day.year - 1
+    return date(year, 4, 1)
 
 
 def month_key(day: date) -> str:

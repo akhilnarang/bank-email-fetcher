@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from financial_dashboard.core.dates import financial_year_start
 from financial_dashboard.core.deps import get_session
 from financial_dashboard.core.templating import get_templates
 from financial_dashboard.db import (
@@ -202,7 +203,7 @@ def _date_presets(today: date) -> list[dict[str, str]]:
         if current_month_start.month == 12
         else current_month_start.replace(month=current_month_start.month + 1)
     )
-    fy_start_year = today.year if today.month >= 4 else today.year - 1
+    fy_start_year = financial_year_start(today).year
     ranges = (
         ("Current month", current_month_start, next_month_start - timedelta(days=1)),
         ("Previous month", previous_month_start, previous_month_end),
