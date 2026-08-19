@@ -158,7 +158,8 @@ async def _resolve_create_new(
     decision = await find_match(session, txn_data, "sms")
     if decision.action != "defer":
         raise SmsDuplicateResolutionError("Duplicate decision is no longer deferred")
-    if decision.deferral_reason and decision.deferral_reason.startswith("reference_"):
+    reason = decision.deferral_reason or ""
+    if reason.startswith("reference_") or reason == "multiple_reference_candidates":
         raise SmsDuplicateResolutionError(
             "A reference mismatch cannot create a second transaction"
         )

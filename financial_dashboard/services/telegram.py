@@ -18,6 +18,7 @@ from typing import cast
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError, RetryAfter
 from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
+from sqlalchemy.exc import OperationalError
 
 from financial_dashboard.db import Transaction, async_session
 from financial_dashboard.services.settings import get_telegram_chat_id
@@ -474,7 +475,6 @@ async def send_sms_duplicate_disambiguation_prompt(payload: dict, chat_id: int) 
     ]
     if transaction_date:
         lines.append(transaction_date)
-    lines.append("Possible duplicate: choose the ledger result.")
 
     buttons = [
         [
@@ -486,10 +486,19 @@ async def send_sms_duplicate_disambiguation_prompt(payload: dict, chat_id: int) 
         for transaction_id in candidate_ids
     ]
     reason = str(payload.get("reason") or "")
-    if not reason.startswith("reference_"):
+    # A reference mismatch cannot create a second row: the unique reference
+    # index forbids it. Offer no Create-new button for those reasons.
+    ref_conflict = reason.startswith("reference_") or reason == (
+        "multiple_reference_candidates"
+    )
+    if not ref_conflict:
         buttons.append(
             [InlineKeyboardButton("Create new", callback_data=f"smsdup:v1:n:{sms_id}")]
         )
+    if buttons:
+        lines.append("Possible duplicate. Choose an action below.")
+    else:
+        lines.append("Possible duplicate. Resolve it on the web.")
     # TODO: Persist duplicate prompts in a transactional outbox before dispatch.
     await app.bot.send_message(
         chat_id=chat_id,
@@ -529,6 +538,10 @@ async def _handle_sms_duplicate_callback(update: Update, context) -> None:
             )
     except SmsDuplicateResolutionError as exc:
         await query.answer(str(exc))
+        return
+    except OperationalError:
+        # A rival tap holds the SMS write lock past the busy timeout.
+        await query.answer("Busy, try again")
         return
 
     await query.answer()
