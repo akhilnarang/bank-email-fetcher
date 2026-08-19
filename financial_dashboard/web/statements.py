@@ -50,6 +50,7 @@ from financial_dashboard.services.accounts import (
     retry_password_required_statements as accounts_retry_password_required_statements,
 )
 from financial_dashboard.services.reminders import init_payment_tracking
+from financial_dashboard.services.settings import get_telegram_chat_id
 from financial_dashboard.services.statement_payments import build_payments_view
 from financial_dashboard.services.snapshots import emit_cc_snapshot
 from financial_dashboard.services.statements.bank import process_bank_statement_email
@@ -616,6 +617,18 @@ async def statement_settle_sms(
             await check_payment_received(*outcome.pending_payment_check)
         except Exception as exc:
             logger.warning("Settle payment-received check failed: %s", exc)
+
+    if outcome.pending_duplicate_disambiguation is not None:
+        from financial_dashboard.services.telegram import (
+            send_sms_duplicate_disambiguation_prompt,
+        )
+
+        try:
+            await send_sms_duplicate_disambiguation_prompt(
+                outcome.pending_duplicate_disambiguation, get_telegram_chat_id()
+            )
+        except Exception as exc:
+            logger.warning("Settle duplicate prompt failed: %s", exc)
 
     return RedirectResponse(url=f"/statements/{upload_id}", status_code=303)
 

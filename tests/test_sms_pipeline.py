@@ -1167,6 +1167,11 @@ async def test_process_sms_row_deferred_marks_skipped_no_row(session):
     assert outcome.status == "skipped"
     assert outcome.transaction_id is None
     assert outcome.primary_notification is None
+    assert outcome.pending_duplicate_disambiguation is not None
+    assert outcome.pending_duplicate_disambiguation["reason"] == "balance_ambiguous"
+    assert outcome.pending_duplicate_disambiguation["resolution_candidate_ids"] == [
+        existing.id
+    ]
     assert sms.status == "skipped"
     assert sms.transaction_id is None
     assert sms.parse_error is not None

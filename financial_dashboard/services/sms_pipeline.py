@@ -44,6 +44,8 @@ class ProcessSmsOutcome:
     """{txn_id, candidate_account_ids, amount, bank} — fires the Telegram
     inline-keyboard prompt when account_id couldn't be resolved (the user
     has more than one CC for this bank registered)."""
+    pending_duplicate_disambiguation: dict | None = None
+    """Deferred SMS duplicate prompt payload for post-commit dispatch."""
 
 
 def parsed_sms_to_txn_data(parsed: ParsedSms, sms_row: SmsMessage) -> dict | None:
@@ -248,7 +250,20 @@ async def process_sms_row(
         sms_row.status = "skipped"
         sms_row.transaction_id = None
         sms_row.parse_error = DUP_DEFER_NOTE
-        return ProcessSmsOutcome(status="skipped", transaction_id=None)
+        return ProcessSmsOutcome(
+            status="skipped",
+            transaction_id=None,
+            pending_duplicate_disambiguation={
+                "sms_id": sms_row.id,
+                "reason": diff.deferral_reason,
+                "resolution_candidate_ids": list(diff.resolution_candidate_ids),
+                "bank": txn_data["bank"],
+                "direction": txn_data["direction"],
+                "amount": txn_data["amount"],
+                "counterparty": txn_data.get("counterparty"),
+                "transaction_date": txn_data.get("transaction_date"),
+            },
+        )
 
     assert txn_row is not None  # outcome is "created" or "enriched" here
 

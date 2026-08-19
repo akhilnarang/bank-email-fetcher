@@ -170,10 +170,9 @@ async def test_settle_is_idempotent_on_linked_sms(maker):
 
     first = await _settle()
     assert first.transaction_id is not None
-    # Second settle of the now-linked SMS must not create a second credit. The
-    # merge matcher sees the identical existing credit and defers (no row).
+    # A second settle reuses the same equal-balance credit.
     second = await _settle()
-    assert second.transaction_id is None
+    assert second.transaction_id == first.transaction_id
 
     async with maker() as session:
         credits = (
@@ -226,31 +225,10 @@ async def _add_settled_credit(maker, acc_id, *, amount, day=8):
 
 
 @pytest.mark.anyio
-async def test_settled_credit_cancels_matching_provisional(maker):
-    """A provisional whose real settlement already landed is not pending.
-
-    The settlement is a different, linked credit row; the provisional stays
-    unlinked. It must be cancelled against the settled credit, not shown as a
-    phantom pending payment (which would double-count if settled)."""
+async def test_distinct_same_amount_settled_credit_keeps_provisional(maker):
+    """Amount equality alone does not hide a distinct pending payment."""
     upload_id, acc_id = await _seed_open_statement(maker)
     await _add_provisional_sms(maker, day=7)
-    await _add_settled_credit(maker, acc_id, amount="30000.00", day=8)
-
-    upload = await _get_upload(maker, upload_id)
-    async with maker() as session:
-        view = await build_payments_view(session, upload)
-
-    assert len(view.settled) == 1
-    assert view.pending == []
-
-
-@pytest.mark.anyio
-async def test_two_provisionals_one_settled_leaves_one_pending(maker):
-    """Two equal provisionals with one real settlement: exactly one stays
-    pending (the settled budget cancels only one)."""
-    upload_id, acc_id = await _seed_open_statement(maker)
-    await _add_provisional_sms(maker, day=7, minute=7)
-    await _add_provisional_sms(maker, day=7, minute=11)
     await _add_settled_credit(maker, acc_id, amount="30000.00", day=8)
 
     upload = await _get_upload(maker, upload_id)
@@ -261,8 +239,56 @@ async def test_two_provisionals_one_settled_leaves_one_pending(maker):
     assert len(view.pending) == 1
 
 
+@pytest.mark.anyio
+async def test_two_provisionals_one_settled_keeps_both_pending(maker):
+    """An amount-only settled row does not hide either provisional."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7, minute=7)
+    await _add_provisional_sms(maker, day=7, minute=11)
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=8)
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.settled) == 1
+    assert len(view.pending) == 2
+
+
+@pytest.mark.anyio
+async def test_confident_settled_match_hides_provisional(maker):
+    """Equal authoritative balance and identity hide the settled provisional."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7, hour=6, minute=0)
+    async with maker() as session:
+        session.add(
+            Transaction(
+                account_id=acc_id,
+                bank="hdfc",
+                email_type="hdfc_cc_payment_received_alert",
+                direction="credit",
+                amount=Decimal("30000.00"),
+                currency="INR",
+                transaction_date=datetime.date(2026, 8, 7),
+                transaction_time=datetime.time(11, 30),
+                card_mask="1234",
+                balance=Decimal("100000.00"),
+                source="email",
+            )
+        )
+        await session.commit()
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.settled) == 1
+    assert view.pending == []
+
+
 async def _seed_second_statement(maker, acc_id, *, created_at, total="50,000.00"):
     """A later statement for the SAME account, opening the next cycle."""
+
     async with maker() as session:
         upload = StatementUpload(
             account_id=acc_id,

@@ -38,6 +38,15 @@ from financial_dashboard.services.parser_quirks import (
 Channel = Literal["sms", "email"]
 MergeOutcome = Literal["created", "enriched", "deferred"]
 MatchKind = Literal["standard", "am_pm_alias", "ref_amount_mismatch"]
+DeferralReason = Literal[
+    "reference_amount_mismatch",
+    "reference_balance_mismatch",
+    "multiple_reference_candidates",
+    "balance_ambiguous",
+    "multiple_candidates",
+    "source_slot_filled",
+    "source_slot_conflict",
+]
 
 # find_match's three terminal outcomes:
 #   match  → enrich the carried Transaction
@@ -85,6 +94,8 @@ class MatchDecision(NamedTuple):
     # Only set when action == "match".
     transaction: Transaction | None = None
     kind: MatchKind | None = None
+    deferral_reason: DeferralReason | None = None
+    resolution_candidate_ids: tuple[int, ...] = ()
 
 
 # Sentinel prefix on the channel-specific error note for a deferred row, so
@@ -127,6 +138,8 @@ class EnrichmentDiff:
     """Fields that were NULL before and now have a value. {field_name: new_value}"""
     overwritten: dict[str, tuple[object, object]] = field(default_factory=dict)
     """Fields that had a value and were overwritten. {field_name: (old, new)}"""
+    deferral_reason: DeferralReason | None = None
+    resolution_candidate_ids: tuple[int, ...] = ()
 
     @property
     def changed_fields(self) -> list[str]:
@@ -138,6 +151,14 @@ class MergeTransactionResult(NamedTuple):
     # None only when outcome == "deferred" (no row created).
     transaction: Transaction | None
     diff: EnrichmentDiff
+
+    @property
+    def deferral_reason(self) -> DeferralReason | None:
+        return self.diff.deferral_reason
+
+    @property
+    def resolution_candidate_ids(self) -> tuple[int, ...]:
+        return self.diff.resolution_candidate_ids
 
 
 # Fields considered for enrichment. Match key fields (bank, direction,
@@ -528,7 +549,11 @@ def _decide(
         # eq>1 (two stored rows same balance) or survivors all balance-None
         # (incoming has a balance, candidate doesn't — presence mismatch):
         # ambiguous, don't guess.
-        return MatchDecision("defer")
+        return MatchDecision(
+            "defer",
+            deferral_reason="balance_ambiguous",
+            resolution_candidate_ids=tuple(c.id for c in candidates),
+        )
 
     # Step 3 — incoming has no balance.
     balanceless = [c for c in candidates if c.balance is None]
@@ -536,7 +561,17 @@ def _decide(
     if len(candidates) == 1 and len(balanceless) == 1 and len(open_bl) == 1:
         # Clean balance-less 1+1 (e.g. HDFC CC) → merge as today.
         return MatchDecision("match", candidates[0], "standard")
-    return MatchDecision("defer")
+    if len(candidates) > 1:
+        reason: DeferralReason = "multiple_candidates"
+    elif not open_bl:
+        reason = "source_slot_filled"
+    else:
+        reason = "balance_ambiguous"
+    return MatchDecision(
+        "defer",
+        deferral_reason=reason,
+        resolution_candidate_ids=tuple(c.id for c in candidates),
+    )
 
 
 def _normalized_currency(value: object) -> str:
@@ -682,7 +717,11 @@ async def find_match(
                     gates=("bank_direction_reference", "amount"),
                     reason="reference_amount_mismatch",
                 )
-                return MatchDecision("defer", kind="ref_amount_mismatch")
+                return MatchDecision(
+                    "defer",
+                    kind="ref_amount_mismatch",
+                    deferral_reason="reference_amount_mismatch",
+                )
             # Apply the same authoritative balance guard as the fuzzy path.
             # When both sources know the post-transaction balance and disagree,
             # they cannot describe the same event even if the reference was
@@ -706,7 +745,11 @@ async def find_match(
                 # (bank, reference_number, direction) forbids the second row.
                 # We can neither merge contradictory balances nor physically
                 # insert the distinct event, so manual resolution is required.
-                return MatchDecision("defer", kind="ref_amount_mismatch")
+                return MatchDecision(
+                    "defer",
+                    kind="ref_amount_mismatch",
+                    deferral_reason="reference_balance_mismatch",
+                )
             _record_match_evidence(
                 evidence,
                 path="reference",
@@ -716,6 +759,11 @@ async def find_match(
             )
             return MatchDecision("match", rows[0], "standard")
         if len(rows) > 1:
+            compatible_rows = [
+                row
+                for row in rows
+                if await qualifies_as_explicit_match(session, row, txn_data)
+            ]
             _record_match_evidence(
                 evidence,
                 path="reference",
@@ -723,7 +771,11 @@ async def find_match(
                 gates=("bank_direction_reference", "unique_candidate"),
                 reason="multiple_reference_candidates",
             )
-            return MatchDecision("defer")
+            return MatchDecision(
+                "defer",
+                deferral_reason="multiple_reference_candidates",
+                resolution_candidate_ids=tuple(row.id for row in compatible_rows),
+            )
 
     candidates = await _gather_fuzzy_candidates(session, txn_data)
     if candidates:
@@ -1021,7 +1073,14 @@ async def merge_transaction(
             return MergeTransactionResult("created", row, EnrichmentDiff())
 
     if decision.action == "defer":
-        return MergeTransactionResult("deferred", None, EnrichmentDiff())
+        return MergeTransactionResult(
+            "deferred",
+            None,
+            EnrichmentDiff(
+                deferral_reason=decision.deferral_reason,
+                resolution_candidate_ids=decision.resolution_candidate_ids,
+            ),
+        )
 
     assert decision.transaction is not None  # action == "match"
     match = decision.transaction
@@ -1039,7 +1098,14 @@ async def merge_transaction(
         # The matcher observed an open destination slot, but another source
         # claimed it first. Automatic ingestion must defer rather than enrich
         # an unowned row or turn this expected race into a 500.
-        return MergeTransactionResult("deferred", None, EnrichmentDiff())
+        return MergeTransactionResult(
+            "deferred",
+            None,
+            EnrichmentDiff(
+                deferral_reason="source_slot_conflict",
+                resolution_candidate_ids=(match.id,),
+            ),
+        )
     return MergeTransactionResult("enriched", match, diff)
 
 

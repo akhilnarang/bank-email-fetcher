@@ -180,4 +180,16 @@ async def post_sms(
         except Exception as exc:
             logger.warning("Disambiguation prompt failed: %s", exc)
 
+    if outcome is not None and outcome.pending_duplicate_disambiguation is not None:
+        from financial_dashboard.services.telegram import (
+            send_sms_duplicate_disambiguation_prompt,
+        )
+
+        try:
+            await send_sms_duplicate_disambiguation_prompt(
+                outcome.pending_duplicate_disambiguation, get_telegram_chat_id()
+            )
+        except Exception as exc:
+            logger.warning("Duplicate disambiguation prompt failed: %s", exc)
+
     return Response(status_code=201)

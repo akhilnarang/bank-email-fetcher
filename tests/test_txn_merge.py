@@ -2146,3 +2146,87 @@ def test_is_duplicate_transaction_error_unrelated_constraint_is_false():
     assert not is_duplicate_transaction_error(
         _exc_with_orig("NOT NULL constraint failed: transactions.amount")
     )
+
+
+@pytest.mark.anyio
+async def test_find_match_deferral_metadata_keeps_only_compatible_candidates(
+    session: AsyncSession,
+):
+    compatible = Transaction(
+        bank="samplebank",
+        email_type="sample_debit",
+        direction="debit",
+        amount=Decimal("246.80"),
+        currency="INR",
+        transaction_date=date(2026, 8, 12),
+        transaction_time=time(10, 15),
+        counterparty="Synthetic Shop",
+        balance=None,
+        source="email",
+    )
+    incompatible = Transaction(
+        bank="samplebank",
+        email_type="sample_debit",
+        direction="debit",
+        amount=Decimal("246.80"),
+        currency="INR",
+        transaction_date=date(2026, 8, 12),
+        transaction_time=time(10, 16),
+        counterparty="Synthetic Shop",
+        balance=Decimal("6000.00"),
+        source="email",
+    )
+    session.add_all([compatible, incompatible])
+    await session.flush()
+
+    decision = await find_match(
+        session,
+        {
+            "bank": "samplebank",
+            "direction": "debit",
+            "amount": Decimal("246.80"),
+            "currency": "INR",
+            "transaction_date": date(2026, 8, 12),
+            "transaction_time": time(10, 15),
+            "counterparty": "Synthetic Shop",
+            "balance": Decimal("5753.20"),
+        },
+    )
+
+    assert decision.action == "defer"
+    assert decision.deferral_reason == "balance_ambiguous"
+    assert decision.resolution_candidate_ids == (compatible.id,)
+
+
+@pytest.mark.anyio
+async def test_merge_transaction_threads_reference_mismatch_metadata(
+    session: AsyncSession,
+):
+    existing = Transaction(
+        bank="samplebank",
+        email_type="sample_debit",
+        direction="debit",
+        amount=Decimal("111.00"),
+        reference_number="SYNTH-REF-42",
+    )
+    session.add(existing)
+    await session.flush()
+
+    result = await merge_transaction(
+        session,
+        "sms",
+        {
+            "bank": "samplebank",
+            "email_type": "sample_debit",
+            "direction": "debit",
+            "amount": Decimal("222.00"),
+            "reference_number": "SYNTH-REF-42",
+        },
+    )
+    outcome, transaction, diff = result
+
+    assert outcome == "deferred"
+    assert transaction is None
+    assert diff.changed_fields == []
+    assert result.deferral_reason == "reference_amount_mismatch"
+    assert result.resolution_candidate_ids == ()

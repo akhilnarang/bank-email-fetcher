@@ -115,6 +115,18 @@ async def reparse_sms(
         except Exception as exc:
             logger.warning("Reparse disambiguation prompt failed: %s", exc)
 
+    if outcome.pending_duplicate_disambiguation is not None:
+        from financial_dashboard.services.telegram import (
+            send_sms_duplicate_disambiguation_prompt,
+        )
+
+        try:
+            await send_sms_duplicate_disambiguation_prompt(
+                outcome.pending_duplicate_disambiguation, get_telegram_chat_id()
+            )
+        except Exception as exc:
+            logger.warning("Reparse duplicate prompt failed: %s", exc)
+
     if outcome.status == "error":
         raise UnprocessableEntityException(detail=sms.parse_error or "Parse error")
 
@@ -172,7 +184,10 @@ async def reparse_all_failed_sms(
 
     # Lazy-imported here to avoid a top-level cycle.
     from financial_dashboard.services.reminders import check_payment_received
-    from financial_dashboard.services.telegram import send_disambiguation_prompt
+    from financial_dashboard.services.telegram import (
+        send_disambiguation_prompt,
+        send_sms_duplicate_disambiguation_prompt,
+    )
 
     counts = {"processed": 0, "enriched": 0, "still_error": 0, "skipped": 0}
     chat_id_for_dispatch = (
@@ -254,6 +269,18 @@ async def reparse_all_failed_sms(
                 except Exception as exc:
                     logger.warning(
                         "Bulk reparse disambiguation prompt failed for SMS %d: %s",
+                        sms_id,
+                        exc,
+                    )
+            if outcome.pending_duplicate_disambiguation is not None:
+                try:
+                    await send_sms_duplicate_disambiguation_prompt(
+                        outcome.pending_duplicate_disambiguation,
+                        get_telegram_chat_id(),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Bulk reparse duplicate prompt failed for SMS %d: %s",
                         sms_id,
                         exc,
                     )

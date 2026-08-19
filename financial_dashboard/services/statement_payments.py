@@ -39,6 +39,7 @@ from financial_dashboard.services.cc_disambiguation import (
     is_cc_payment_received_email,
 )
 from financial_dashboard.services.sms_pipeline import parsed_sms_to_txn_data
+from financial_dashboard.services.txn_merge import find_match
 from financial_dashboard.services.statements.cc import parse_cc_amount
 
 logger = logging.getLogger(__name__)
@@ -133,12 +134,10 @@ async def _pending_payments(
     ledger role is not stored on the SMS row. The candidate set is small (one
     card's unlinked SMS in one cycle), so parsing on page load is cheap.
 
-    A provisional whose real settlement already landed must NOT show as pending.
+    A provisional whose real settlement already landed must not show as pending.
     The settlement is a different SMS linked to its own credit row, so the
-    provisional stays unlinked. Suppress a provisional by cancelling it against
-    an already-settled credit of the same amount: each settled credit consumes
-    one equal-amount provisional. Without this the panel shows a phantom pending
-    payment, and settling it would double-count.
+    provisional stays unlinked. Suppress it only when the transaction matcher
+    confidently identifies a settled row from this statement cycle.
     """
     account = await session.get(Account, upload.account_id)
     if account is None:
@@ -148,8 +147,8 @@ async def _pending_payments(
     # day is IST. A payment near IST-midnight is stored on the adjacent UTC
     # date, so a tight UTC-midnight window would drop it. Pad the window by a
     # day on each edge to cover the ~5.5h skew. Over-inclusion is safe: a
-    # provisional pulled in from an adjacent cycle is still cancelled by the
-    # settled budget, filtered by card, and requires ``transaction_id IS NULL``;
+    # provisional pulled in from an adjacent cycle still needs a transaction
+    # identity match, a matching card, and ``transaction_id IS NULL``;
     # the worst case is showing a genuinely-unsettled neighbour payment, which
     # settling attributes to the correct cycle anyway.
     lower = datetime.combine(
@@ -178,11 +177,7 @@ async def _pending_payments(
         .all()
     )
 
-    # Budget of already-settled credit amounts. A provisional matching a
-    # remaining budget entry is treated as settled and hidden.
-    settled_budget: dict[str, int] = {}
-    for row in settled:
-        settled_budget[row.amount] = settled_budget.get(row.amount, 0) + 1
+    settled_ids = {row.txn_id for row in settled}
 
     pending: list[PendingPayment] = []
     for sms in rows:
@@ -201,12 +196,15 @@ async def _pending_payments(
         if not _card_belongs_to_account(txn_data.get("card_mask"), account):
             continue
 
-        amount = _fmt_amount(txn_data["amount"])
-        if settled_budget.get(amount, 0) > 0:
-            # The real settlement for this payment already landed; consume the
-            # budget entry and hide the provisional.
-            settled_budget[amount] -= 1
+        decision = await find_match(session, txn_data, "sms")
+        if (
+            decision.action == "match"
+            and decision.transaction is not None
+            and decision.transaction.id in settled_ids
+        ):
             continue
+
+        amount = _fmt_amount(txn_data["amount"])
 
         txn_date = txn_data.get("transaction_date")
         balance = txn_data.get("balance")

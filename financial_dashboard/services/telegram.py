@@ -287,6 +287,9 @@ async def _handle_callback(update: Update, context) -> None:
 
         await handle_mark_paid_callback(update, context)
         return
+    if query.data.startswith("smsdup:v1:"):
+        await _handle_sms_duplicate_callback(update, context)
+        return
     if query.data.startswith("cc_pay_pick:"):
         await _handle_cc_pay_pick_callback(update, context)
         return
@@ -424,6 +427,136 @@ async def send_enrichment_notification(
         logger.warning(
             "Failed to send enrichment notification for txn #%s: %s", txn_id, e
         )
+
+
+def _parse_sms_duplicate_callback(
+    data: str,
+) -> tuple[Literal["merge", "create_new"], int, int | None] | None:
+    if len(data.encode()) > 64:
+        return None
+    parts = data.split(":")
+    if len(parts) == 5 and parts[:3] == ["smsdup", "v1", "m"]:
+        action: Literal["merge", "create_new"] = "merge"
+        raw_ids = parts[3:]
+    elif len(parts) == 4 and parts[:3] == ["smsdup", "v1", "n"]:
+        action = "create_new"
+        raw_ids = parts[3:]
+    else:
+        return None
+    try:
+        ids = [int(value) for value in raw_ids]
+    except ValueError:
+        return None
+    if any(value <= 0 for value in ids):
+        return None
+    transaction_id = ids[1] if action == "merge" else None
+    return action, ids[0], transaction_id
+
+
+async def send_sms_duplicate_disambiguation_prompt(payload: dict, chat_id: int) -> None:
+    """Send the deferred SMS duplicate decision keyboard."""
+    app = tg_app
+    if not app:
+        return
+
+    sms_id = int(payload["sms_id"])
+    candidate_ids = [
+        int(value) for value in payload["resolution_candidate_ids"] if int(value) > 0
+    ]
+    bank = html.escape(str(payload.get("bank", "")).upper())
+    direction = html.escape(str(payload.get("direction", "")).upper())
+    amount = html.escape(f"{Decimal(str(payload.get('amount', 0))):,.2f}")
+    counterparty = html.escape(str(payload.get("counterparty") or ""))
+    transaction_date = html.escape(str(payload.get("transaction_date") or ""))
+    lines = [
+        f"⚠️ <b>{bank}</b> {direction} SMS #{sms_id}",
+        f"₹{amount}" + (f" · {counterparty}" if counterparty else ""),
+    ]
+    if transaction_date:
+        lines.append(transaction_date)
+    lines.append("Possible duplicate: choose the ledger result.")
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                f"Merge into #{transaction_id}",
+                callback_data=f"smsdup:v1:m:{sms_id}:{transaction_id}",
+            )
+        ]
+        for transaction_id in candidate_ids
+    ]
+    reason = str(payload.get("reason") or "")
+    if not reason.startswith("reference_"):
+        buttons.append(
+            [InlineKeyboardButton("Create new", callback_data=f"smsdup:v1:n:{sms_id}")]
+        )
+    # TODO: Persist duplicate prompts in a transactional outbox before dispatch.
+    await app.bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        parse_mode="HTML",
+    )
+
+
+async def _handle_sms_duplicate_callback(update: Update, context) -> None:
+    """Resolve an authorized deferred SMS duplicate callback."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    if not query.message:
+        await query.answer("Message no longer available")
+        return
+    if query.message.chat.id != get_telegram_chat_id():
+        await query.answer("Unauthorized")
+        return
+
+    parsed = _parse_sms_duplicate_callback(query.data)
+    if parsed is None:
+        await query.answer("Invalid callback")
+        return
+    action, sms_id, transaction_id = parsed
+
+    from financial_dashboard.services.sms_duplicate_resolution import (
+        SmsDuplicateResolutionError,
+        resolve_sms_duplicate,
+    )
+
+    try:
+        async with async_session() as session:
+            result = await resolve_sms_duplicate(
+                session, sms_id, action, transaction_id
+            )
+    except SmsDuplicateResolutionError as exc:
+        await query.answer(str(exc))
+        return
+
+    await query.answer()
+    if result.status == "already_resolved":
+        text = f"Already resolved as #{result.transaction_id}"
+    elif result.status == "merged":
+        text = f"SMS #{sms_id} merged into #{result.transaction_id}"
+    else:
+        text = f"SMS #{sms_id} created transaction #{result.transaction_id}"
+    try:
+        await query.edit_message_text(text)
+    except Exception as exc:
+        logger.warning("SMS duplicate callback edit failed: %s", exc)
+
+    if result.pending_payment_check is not None:
+        from financial_dashboard.services.reminders import check_payment_received
+
+        try:
+            await check_payment_received(*result.pending_payment_check)
+        except Exception as exc:
+            logger.warning("SMS duplicate payment check failed: %s", exc)
+    if result.pending_disambiguation is not None:
+        try:
+            await send_disambiguation_prompt(
+                result.pending_disambiguation, get_telegram_chat_id()
+            )
+        except Exception as exc:
+            logger.warning("SMS duplicate account picker failed: %s", exc)
 
 
 async def send_disambiguation_prompt(payload: dict, chat_id: int) -> None:
