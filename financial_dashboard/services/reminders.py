@@ -116,9 +116,7 @@ async def init_payment_tracking(statement_upload_id: int) -> bool:
                 # Recompute from the cycle's qualifying credits now, so an
                 # already-paid statement is not born UNPAID and does not remind.
                 # (recompute emits the snapshot itself.)
-                await recompute_cc_payment_state(
-                    session, upload, unpaid_when_zero=True
-                )
+                await recompute_cc_payment_state(session, upload, unpaid_when_zero=True)
             await session.commit()
             logger.info(
                 "Payment tracking initialized for statement #%s: due=%s status=%s",

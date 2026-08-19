@@ -415,10 +415,9 @@ async def test_recompute_unpaid_when_zero_flag(session_maker):
         upload = await _upload(s, account, total_due="5000.00")
         await s.flush()
 
-        assert (
-            await recompute_cc_payment_state(s, upload, unpaid_when_zero=True)
-            == Decimal("0.00")
-        )
+        assert await recompute_cc_payment_state(
+            s, upload, unpaid_when_zero=True
+        ) == Decimal("0.00")
         assert upload.payment_status == PaymentStatus.UNPAID
 
         assert await recompute_cc_payment_state(s, upload) == Decimal("0.00")

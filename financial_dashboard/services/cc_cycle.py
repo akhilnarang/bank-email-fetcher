@@ -72,7 +72,9 @@ def _boundary(earlier_due: date | None, later_created: datetime | None) -> date 
     return None
 
 
-async def cc_cycle_window(session: AsyncSession, upload: StatementUpload) -> CycleWindow:
+async def cc_cycle_window(
+    session: AsyncSession, upload: StatementUpload
+) -> CycleWindow:
     """Return ``upload``'s billing-cycle window.
 
     ``start`` = the boundary with the previous anchor cycle (day after its due
@@ -93,16 +95,20 @@ async def cc_cycle_window(session: AsyncSession, upload: StatementUpload) -> Cyc
         # cycle. Fall back to the created_at-bounded window so its panel still
         # spans only its own ingestion range, not everything after it.
         later = (
-            await session.execute(
-                select(StatementUpload.created_at)
-                .where(
-                    StatementUpload.account_id == upload.account_id,
-                    StatementUpload.created_at > upload.created_at,
+            (
+                await session.execute(
+                    select(StatementUpload.created_at)
+                    .where(
+                        StatementUpload.account_id == upload.account_id,
+                        StatementUpload.created_at > upload.created_at,
+                    )
+                    .order_by(StatementUpload.created_at.asc())
+                    .limit(1)
                 )
-                .order_by(StatementUpload.created_at.asc())
-                .limit(1)
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         return CycleWindow(
             start=created_start, end=later.date() if later is not None else None
         )
