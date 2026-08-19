@@ -252,6 +252,64 @@ async def test_init_payment_tracking_positive_due_marks_unpaid(maker):
 
 
 @pytest.mark.anyio
+async def test_init_payment_tracking_detects_prepaid_bill(maker):
+    """A bill paid BEFORE its statement is ingested (the payment predates the
+    new statement's created_at) is detected at ingestion. init recomputes from
+    the cycle's qualifying credits and marks the statement PAID, not UNPAID, so
+    no false reminder fires."""
+    acc_id = await h.add_cc_account(maker)
+    async with maker() as session:
+        prior = StatementUpload(
+            account_id=acc_id,
+            bank="hdfc",
+            filename="cc.pdf",
+            file_path="/tmp/cc.pdf",
+            status="imported",
+            due_date="04/08/2026",
+            total_amount_due="10,000.00",
+            payment_status=PaymentStatus.PAID,
+            created_at=datetime.datetime(2026, 7, 18, tzinfo=datetime.UTC),
+        )
+        session.add(prior)
+        # Paid 8/16 — after prior's due (8/4), before the new statement exists.
+        session.add(
+            Transaction(
+                account_id=acc_id,
+                bank="hdfc",
+                email_type="hdfc_cc_payment_alert",
+                direction="credit",
+                amount=Decimal("750.00"),
+                transaction_date=datetime.date(2026, 8, 16),
+                counterparty="Payment received",
+            )
+        )
+        await session.commit()
+
+    async with maker() as session:
+        latest = StatementUpload(
+            account_id=acc_id,
+            bank="hdfc",
+            filename="cc.pdf",
+            file_path="/tmp/cc.pdf",
+            status="imported",
+            due_date="04/09/2026",
+            total_amount_due="750.00",
+            created_at=datetime.datetime(2026, 8, 18, tzinfo=datetime.UTC),
+        )
+        session.add(latest)
+        await session.commit()
+        latest_id = latest.id
+
+    tracked = await init_payment_tracking(latest_id)
+    assert tracked is True
+    async with maker() as session:
+        latest = await session.get(StatementUpload, latest_id)
+        assert latest.payment_status == PaymentStatus.PAID
+        assert latest.payment_paid_amount == Decimal("750.00")
+        assert latest.payment_paid_at is not None
+
+
+@pytest.mark.anyio
 async def test_init_payment_tracking_skips_stale_due(maker):
     """A statement whose due date is before the first of the current month is
     stale — init_payment_tracking skips it (returns False, no status set)."""

@@ -16,9 +16,8 @@ self-healing: no staging table to clean up.
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +29,11 @@ from financial_dashboard.db import (
     SmsMessage,
     StatementUpload,
     Transaction,
+)
+from financial_dashboard.services.cc_cycle import (
+    CycleWindow,
+    cc_cycle_window,
+    transactions_in_cycle,
 )
 from financial_dashboard.services.cc_disambiguation import (
     is_cc_payment_received_email,
@@ -74,77 +78,16 @@ def _fmt_amount(value) -> str:
     return f"{Decimal(str(value)):,.2f}"
 
 
-class CycleBounds(NamedTuple):
-    start: date
-    end: date | None
-    next_created: datetime | None
-
-
-async def _cycle_bounds(session: AsyncSession, upload: StatementUpload) -> CycleBounds:
-    """Return the cycle's bounds for this statement.
-
-    ``start`` is this statement's ``created_at`` date (the ingestion timestamp,
-    a proxy for the bank's generation date). ``next_created`` is the NEXT
-    statement's ``created_at`` for the same account, or ``None`` (open) when
-    this is the latest cycle. ``end`` is ``next_created``'s date. Start matches
-    the window ``_qualifying_payment_credit_sum`` uses; the upper bounds keep a
-    past cycle from sweeping in a later cycle's payments. ``end`` (a date)
-    bounds dated rows; ``next_created`` (a datetime) bounds date-less rows by
-    their ``created_at``.
-    """
-    created_at = upload.created_at or datetime.now(timezone.utc)
-    start = created_at.date()
-
-    later = (
-        (
-            await session.execute(
-                select(StatementUpload.created_at)
-                .where(
-                    StatementUpload.account_id == upload.account_id,
-                    StatementUpload.created_at > created_at,
-                )
-                .order_by(StatementUpload.created_at.asc())
-                .limit(1)
-            )
-        )
-        .scalars()
-        .first()
-    )
-    end = later.date() if later is not None else None
-    return CycleBounds(start, end, later)
-
-
 async def _settled_payments(
     session: AsyncSession,
     upload: StatementUpload,
-    start: date,
-    end: date | None,
-    next_created: datetime | None,
+    window: CycleWindow,
 ) -> list[SettledPayment]:
     """Real credit transactions that count toward this cycle's paid amount.
 
     Mirrors ``_qualifying_payment_credit_sum``: credit rows the classifier calls
-    a CC bill-payment, in the cycle. A row dated on/after the cycle start counts;
-    a row with no ``transaction_date`` counts when its ``created_at`` falls in
-    the cycle: on/after the statement's generation timestamp and, while a next
-    statement exists, strictly before the next statement's ``created_at``
-    (``next_created``). The date-less upper bound is on ``created_at`` because a
-    NULL ``transaction_date`` would make the dated ``< end`` guard drop the row.
-    ``end`` and ``next_created`` bound the upper edge so a past cycle does not
-    sweep in a later cycle's payments.
+    a CC bill-payment, in the same due-date-anchored cycle window.
     """
-    created_at = upload.created_at or datetime.now(timezone.utc)
-    date_in_cycle = Transaction.transaction_date >= start
-    if end is not None:
-        date_in_cycle = date_in_cycle & (Transaction.transaction_date < end)
-    null_date_in_cycle = Transaction.transaction_date.is_(None) & (
-        Transaction.created_at >= created_at
-    )
-    if next_created is not None:
-        null_date_in_cycle = null_date_in_cycle & (
-            Transaction.created_at < next_created
-        )
-
     rows = (
         (
             await session.execute(
@@ -152,7 +95,7 @@ async def _settled_payments(
                 .where(
                     Transaction.account_id == upload.account_id,
                     Transaction.direction == "credit",
-                    date_in_cycle | null_date_in_cycle,
+                    transactions_in_cycle(window),
                 )
                 .order_by(Transaction.transaction_date.asc(), Transaction.id.asc())
             )
@@ -179,8 +122,7 @@ async def _settled_payments(
 async def _pending_payments(
     session: AsyncSession,
     upload: StatementUpload,
-    start: date,
-    end: date | None,
+    window: CycleWindow,
     settled: list[SettledPayment],
 ) -> list[PendingPayment]:
     """Provisional bill-payment SMS for this card, not yet in the ledger.
@@ -211,16 +153,16 @@ async def _pending_payments(
     # the worst case is showing a genuinely-unsettled neighbour payment, which
     # settling attributes to the correct cycle anyway.
     lower = datetime.combine(
-        start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        window.start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
     )
     conditions = [
         SmsMessage.bank == account.bank,
         SmsMessage.transaction_id.is_(None),
         SmsMessage.received_at >= lower,
     ]
-    if end is not None:
+    if window.end is not None:
         upper = datetime.combine(
-            end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+            window.end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
         )
         conditions.append(SmsMessage.received_at < upper)
 
@@ -374,9 +316,9 @@ async def build_payments_view(
     Returns empty settled/pending and no remaining when the statement has no
     parseable total due (the panel then renders only what it can).
     """
-    start, end, next_created = await _cycle_bounds(session, upload)
-    settled = await _settled_payments(session, upload, start, end, next_created)
-    pending = await _pending_payments(session, upload, start, end, settled)
+    window = await cc_cycle_window(session, upload)
+    settled = await _settled_payments(session, upload, window)
+    pending = await _pending_payments(session, upload, window, settled)
 
     remaining: str | None = None
     if upload.total_amount_due is not None:

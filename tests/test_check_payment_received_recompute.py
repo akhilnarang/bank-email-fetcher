@@ -67,7 +67,7 @@ async def _cc_account(session) -> Account:
 
 
 async def _upload(
-    session, account, total_due="10000.00", created_at=CYCLE_CREATED
+    session, account, total_due="10000.00", created_at=CYCLE_CREATED, due="25/06/2026"
 ) -> StatementUpload:
     upload = StatementUpload(
         account_id=account.id,
@@ -75,7 +75,7 @@ async def _upload(
         filename="cc.pdf",
         file_path="/tmp/cc.pdf",
         status="parsed",
-        due_date="25/06/2026",
+        due_date=due,
         total_amount_due=total_due,
         payment_status=PaymentStatus.UNPAID,
         payment_paid_amount=Decimal("0"),
@@ -234,23 +234,125 @@ async def test_null_date_row_from_prior_cycle_does_not_leak(session_maker):
         assert upload.payment_paid_amount == Decimal("1000.00")
 
 
-async def test_boundary_dated_payment_lands_in_next_cycle_only(session_maker):
-    """A payment contributes to exactly one cycle's paid amount. A payment dated
-    the next statement's generation day belongs to the NEXT cycle, not the old
-    one and not both; a payment dated mid-way through the old cycle belongs to
-    the old one, not the new one."""
+async def test_dated_payment_split_at_due_date_boundary(session_maker):
+    """A payment contributes to exactly one cycle, split at the EARLIER
+    statement's DUE date (not its ingestion date). A payment ON the old bill's
+    due date clears the OLD bill (the due date is inclusive); one the day after
+    clears the new bill; one before clears the old bill. Never both, never
+    neither."""
     async with session_maker() as s:
         account = await _cc_account(s)
-        old = await _upload(s, account, created_at=CYCLE_CREATED)
-        newer = await _upload(s, account, created_at=NEXT_CYCLE_CREATED)
-        s.add(_credit(account, "1000.00", txn_date=NEXT_CYCLE_CREATED.date()))
+        old = await _upload(s, account, due="25/06/2026", created_at=CYCLE_CREATED)
+        newer = await _upload(
+            s, account, due="25/07/2026", created_at=NEXT_CYCLE_CREATED
+        )
+        # Exactly ON old's due date (25/06) -> old cycle.
+        s.add(_credit(account, "500.00", txn_date=dt.date(2026, 6, 25)))
+        # Day after old's due date -> new cycle.
+        s.add(_credit(account, "1000.00", txn_date=dt.date(2026, 6, 26)))
+        # Before old's due date -> old cycle.
         s.add(_credit(account, "2000.00", txn_date=dt.date(2026, 5, 20)))
         await s.flush()
 
         old_paid = await recompute_cc_payment_state(s, old)
         newer_paid = await recompute_cc_payment_state(s, newer)
-        assert old_paid == Decimal("2000.00")
+        assert old_paid == Decimal("2500.00")
         assert newer_paid == Decimal("1000.00")
+
+
+async def test_early_payment_before_ingestion_counts_in_new_cycle(session_maker):
+    """Regression: a bill paid AFTER the statement closed but BEFORE the
+    dashboard ingested it. The payment predates the new statement's created_at,
+    so the old created_at-anchored window dropped it and the statement showed
+    unpaid. The due-date anchor counts it in the new cycle, and does not sweep
+    it into the already-paid old cycle."""
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        prev = await _upload(
+            s,
+            account,
+            total_due="10000.00",
+            due="04/08/2026",
+            created_at=dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+        )
+        latest = await _upload(
+            s,
+            account,
+            total_due="750.00",
+            due="04/09/2026",
+            created_at=dt.datetime(2026, 8, 18, tzinfo=dt.UTC),
+        )
+        # Paid 8/16 — after prev's due (8/4), before latest's ingestion (8/18).
+        s.add(_credit(account, "750.00", txn_date=dt.date(2026, 8, 16)))
+        await s.flush()
+
+        latest_paid = await recompute_cc_payment_state(s, latest)
+        prev_paid = await recompute_cc_payment_state(s, prev)
+        assert latest_paid == Decimal("750.00")
+        assert prev_paid == Decimal("0.00")
+        assert latest.payment_status == PaymentStatus.PAID
+
+
+async def test_dueless_upload_between_cycles_does_not_strand_payment(session_maker):
+    """A password-required / parse-error upload has no due date and must NOT act
+    as a cycle boundary. An early payment for the latest bill is still counted,
+    not stranded by the malformed upload sitting between the two real cycles."""
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        await _upload(
+            s,
+            account,
+            total_due="10000.00",
+            due="04/08/2026",
+            created_at=dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+        )
+        # Malformed upload: no due date, ingested between the two real cycles.
+        await _upload(
+            s,
+            account,
+            total_due="0.00",
+            due=None,
+            created_at=dt.datetime(2026, 8, 10, tzinfo=dt.UTC),
+        )
+        latest = await _upload(
+            s,
+            account,
+            total_due="750.00",
+            due="04/09/2026",
+            created_at=dt.datetime(2026, 8, 18, tzinfo=dt.UTC),
+        )
+        s.add(_credit(account, "750.00", txn_date=dt.date(2026, 8, 16)))
+        await s.flush()
+
+        assert await recompute_cc_payment_state(s, latest) == Decimal("750.00")
+
+
+async def test_late_ingested_statement_no_double_count(session_maker):
+    """When a statement's due date precedes its own ingestion (a late poll), the
+    boundary with the next statement is still one shared value, so a payment is
+    counted in exactly one cycle, never both."""
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        s1 = await _upload(
+            s,
+            account,
+            total_due="5000.00",
+            due="04/08/2026",
+            created_at=dt.datetime(2026, 8, 18, tzinfo=dt.UTC),
+        )
+        s2 = await _upload(
+            s,
+            account,
+            total_due="5000.00",
+            due="04/09/2026",
+            created_at=dt.datetime(2026, 9, 18, tzinfo=dt.UTC),
+        )
+        s.add(_credit(account, "5000.00", txn_date=dt.date(2026, 8, 20)))
+        await s.flush()
+
+        p1 = await recompute_cc_payment_state(s, s1)
+        p2 = await recompute_cc_payment_state(s, s2)
+        assert p1 + p2 == Decimal("5000.00")  # counted once, not in both
 
 
 async def test_null_date_payment_within_old_cycle_counts_in_old_only(session_maker):
@@ -277,22 +379,24 @@ async def test_null_date_payment_within_old_cycle_counts_in_old_only(session_mak
         assert newer_paid == Decimal("0.00")
 
 
-async def test_null_date_payment_after_next_statement_counts_in_next_only(
+async def test_null_date_payment_after_due_boundary_counts_in_new_only(
     session_maker,
 ):
-    """A date-less payment whose created_at falls after the next statement
-    belongs to the next cycle only. Bounding the null branch by created_at keeps
-    it from double-counting into the old cycle as well."""
+    """A date-less payment is placed by its created_at against the same due-date
+    boundary. One created after the earlier bill's due date belongs to the new
+    cycle only — never both."""
     async with session_maker() as s:
         account = await _cc_account(s)
-        old = await _upload(s, account, created_at=CYCLE_CREATED)
-        newer = await _upload(s, account, created_at=NEXT_CYCLE_CREATED)
+        old = await _upload(s, account, due="25/06/2026", created_at=CYCLE_CREATED)
+        newer = await _upload(
+            s, account, due="25/07/2026", created_at=NEXT_CYCLE_CREATED
+        )
         s.add(
             _credit(
                 account,
                 "1500.00",
                 txn_date=None,
-                created_at=dt.datetime(2026, 6, 12, tzinfo=dt.UTC),
+                created_at=dt.datetime(2026, 6, 27, tzinfo=dt.UTC),
             )
         )
         await s.flush()
@@ -301,6 +405,63 @@ async def test_null_date_payment_after_next_statement_counts_in_next_only(
         newer_paid = await recompute_cc_payment_state(s, newer)
         assert old_paid == Decimal("0.00")
         assert newer_paid == Decimal("1500.00")
+
+
+async def test_recompute_unpaid_when_zero_flag(session_maker):
+    """``unpaid_when_zero=True`` (ingestion / reparse) makes a zero paid sum read
+    as UNPAID; the default (delete / credit-arrival) keeps PARTIALLY_PAID."""
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        upload = await _upload(s, account, total_due="5000.00")
+        await s.flush()
+
+        assert (
+            await recompute_cc_payment_state(s, upload, unpaid_when_zero=True)
+            == Decimal("0.00")
+        )
+        assert upload.payment_status == PaymentStatus.UNPAID
+
+        assert await recompute_cc_payment_state(s, upload) == Decimal("0.00")
+        assert upload.payment_status == PaymentStatus.PARTIALLY_PAID
+
+
+async def test_resync_preserves_manually_paid_statement(session_maker):
+    """The reparse self-heal must NOT revert a manually 'Mark as Paid' statement.
+    Such a statement is PAID with no backing credit; a blind recompute would
+    zero it. resync leaves any PAID statement untouched."""
+    from financial_dashboard.services.reminders import resync_tracked_cc_payment_state
+
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        upload = await _upload(s, account, total_due="5000.00")
+        # Manual mark: PAID, full amount, but no payment credit exists.
+        upload.payment_status = PaymentStatus.PAID
+        upload.payment_paid_amount = Decimal("5000.00")
+        upload.payment_paid_at = dt.datetime(2026, 5, 1, tzinfo=dt.UTC)
+        await s.flush()
+
+        did = await resync_tracked_cc_payment_state(s, upload)
+        assert did is False
+        assert upload.payment_status == PaymentStatus.PAID
+        assert upload.payment_paid_amount == Decimal("5000.00")
+        assert upload.payment_paid_at is not None
+
+
+async def test_resync_heals_active_prepaid_statement(session_maker):
+    """resync recomputes an ACTIVE (unpaid) statement, so a reparse marks paid a
+    bill whose credit already exists — the prod #450 remediation path."""
+    from financial_dashboard.services.reminders import resync_tracked_cc_payment_state
+
+    async with session_maker() as s:
+        account = await _cc_account(s)
+        upload = await _upload(s, account, total_due="750.00")  # UNPAID
+        s.add(_credit(account, "750.00", txn_date=dt.date(2026, 5, 12)))
+        await s.flush()
+
+        did = await resync_tracked_cc_payment_state(s, upload)
+        assert did is True
+        assert upload.payment_status == PaymentStatus.PAID
+        assert upload.payment_paid_amount == Decimal("750.00")
 
 
 async def test_paid_at_preserved_on_repeat_recompute(session):

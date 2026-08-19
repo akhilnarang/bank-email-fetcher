@@ -29,6 +29,10 @@ from financial_dashboard.db import (
     Transaction,
     async_session,
 )
+from financial_dashboard.services.cc_cycle import (
+    cc_cycle_window,
+    transactions_in_cycle,
+)
 from financial_dashboard.services.cc_disambiguation import (
     is_cc_payment_received_email,
 )
@@ -104,10 +108,17 @@ async def init_payment_tracking(statement_upload_id: int) -> bool:
                 upload.payment_status = PaymentStatus.PAID
                 upload.payment_paid_at = datetime.now(timezone.utc)
                 upload.payment_paid_amount = amount_due
+                await emit_cc_snapshot(session, upload)
             else:
-                upload.payment_status = PaymentStatus.UNPAID
-
-            await emit_cc_snapshot(session, upload)
+                # A bill can be paid BEFORE its statement is ingested (early
+                # payment, or a slow poll). At that moment the payment credit
+                # found no open cycle to attach to, so it applied to nothing.
+                # Recompute from the cycle's qualifying credits now, so an
+                # already-paid statement is not born UNPAID and does not remind.
+                # (recompute emits the snapshot itself.)
+                await recompute_cc_payment_state(
+                    session, upload, unpaid_when_zero=True
+                )
             await session.commit()
             logger.info(
                 "Payment tracking initialized for statement #%s: due=%s status=%s",
@@ -340,60 +351,12 @@ async def handle_mark_paid_callback(update, context) -> None:
         pass
 
 
-async def _next_statement_created_at(
-    session, upload: StatementUpload
-) -> datetime | None:
-    """Return the next statement's ``created_at`` for the same account.
-
-    Return ``None`` when ``upload`` is the account's latest cycle. This
-    timestamp is the open upper edge of ``upload``'s cycle. A credit that
-    belongs on/after it belongs to the next cycle, not this one.
-    """
-    created_at = upload.created_at or datetime.now(timezone.utc)
-    later = (
-        (
-            await session.execute(
-                select(StatementUpload.created_at)
-                .where(
-                    StatementUpload.account_id == upload.account_id,
-                    StatementUpload.created_at > created_at,
-                )
-                .order_by(StatementUpload.created_at.asc())
-                .limit(1)
-            )
-        )
-        .scalars()
-        .first()
-    )
-    return later
-
-
 async def _qualifying_payment_credit_sum(session, upload: StatementUpload) -> Decimal:
     """Sum the CC bill-payment credits that belong to ``upload``'s cycle.
 
-    The cycle is the half-open date range ``[start, end)``. ``start`` is this
-    statement's ``created_at`` date. ``end`` is the next statement's
-    ``created_at`` date for the same account, or open when this is the latest
-    cycle. ``created_at`` is the ingestion timestamp, used as a proxy for the
-    bank's statement-generation date (the parser does not yet emit a real
-    statement date). A dated credit counts when its ``transaction_date`` is
-    on/after ``start`` and, while a next statement exists, strictly before
-    ``end``. The comparison is on DATE. So a payment dated this statement's own
-    ``created_at`` day counts here, and a payment dated the next statement's
-    ``created_at`` day counts in the NEXT cycle only. Without the upper bound a
-    payment on that boundary day is summed into both cycles and overstates each
-    cycle's paid amount.
-
-    A row with ``transaction_date IS NULL`` (digital alerts whose date isn't
-    parsed get it filled from received_at upstream, so this is unusual) counts
-    when the row's own ``created_at`` falls in the cycle: on/after this
-    statement's ``created_at`` and, while a next statement exists, strictly
-    before the next statement's ``created_at``. The upper bound is on
-    ``created_at`` (a datetime), not ``transaction_date``: a NULL
-    ``transaction_date`` makes a ``transaction_date < end`` guard evaluate to
-    unknown and drop the row. The datetime bound pins each date-less credit to
-    exactly one cycle. The panel's settled-payment window applies the same two
-    bounds.
+    The cycle window is due-date anchored — see ``cc_cycle_window``. A payment
+    made after the statement closed but before the dashboard ingested it still
+    counts here, which the old ``created_at`` anchor missed.
 
     ``is_cc_payment_received_email`` is a Python suffix check that can't be
     expressed cleanly in SQL, so we fetch the candidate credit rows for the
@@ -401,21 +364,7 @@ async def _qualifying_payment_credit_sum(session, upload: StatementUpload) -> De
     deliberately EXCLUDES refunds/reversals/cashback (those don't satisfy a
     bill), matching the canonical classification in cc_disambiguation.
     """
-    created_at = upload.created_at or datetime.now(timezone.utc)
-    cycle_start = created_at.date()
-    next_created = await _next_statement_created_at(session, upload)
-
-    dated_in_cycle = Transaction.transaction_date >= cycle_start
-    null_date_in_cycle = Transaction.transaction_date.is_(None) & (
-        Transaction.created_at >= created_at
-    )
-    if next_created is not None:
-        dated_in_cycle = dated_in_cycle & (
-            Transaction.transaction_date < next_created.date()
-        )
-        null_date_in_cycle = null_date_in_cycle & (
-            Transaction.created_at < next_created
-        )
+    window = await cc_cycle_window(session, upload)
 
     rows = (
         (
@@ -423,7 +372,7 @@ async def _qualifying_payment_credit_sum(session, upload: StatementUpload) -> De
                 select(Transaction).where(
                     Transaction.account_id == upload.account_id,
                     Transaction.direction == "credit",
-                    dated_in_cycle | null_date_in_cycle,
+                    transactions_in_cycle(window),
                 )
             )
         )
@@ -438,7 +387,9 @@ async def _qualifying_payment_credit_sum(session, upload: StatementUpload) -> De
     return total.quantize(Decimal("0.01"))
 
 
-async def recompute_cc_payment_state(session, upload: StatementUpload) -> Decimal:
+async def recompute_cc_payment_state(
+    session, upload: StatementUpload, *, unpaid_when_zero: bool = False
+) -> Decimal:
     """Recompute ``payment_paid_amount`` + status for ``upload`` from scratch,
     then emit its cc-outstanding snapshot. Returns the recomputed paid sum.
 
@@ -447,8 +398,13 @@ async def recompute_cc_payment_state(session, upload: StatementUpload) -> Decima
     calling it repeatedly is idempotent and deleting a payment txn unwinds
     cleanly when the caller re-invokes it. The caller owns the session/commit.
 
+    ``unpaid_when_zero``: a zero sum reads as UNPAID rather than PARTIALLY_PAID.
+    Used at first ingestion and on reparse, where "nothing paid yet" is UNPAID.
+    The delete/credit-arrival paths leave it False so a reopened cycle stays
+    PARTIALLY_PAID.
+
     Precondition: ``upload.total_amount_due`` is set and parseable — callers
-    must check this first (both in-tree callers do).
+    must check this first (all in-tree callers do).
     """
     if upload.total_amount_due is None:
         raise ValueError("recompute_cc_payment_state requires a total_amount_due")
@@ -457,15 +413,17 @@ async def recompute_cc_payment_state(session, upload: StatementUpload) -> Decima
     upload.payment_paid_amount = recomputed
 
     amount_due = parse_cc_amount(upload.total_amount_due)
-    fully_paid = recomputed >= amount_due
-    if fully_paid:
+    if recomputed >= amount_due:
         # Stamp paid-at only on the transition into PAID; a later recompute
         # that stays PAID must preserve the original timestamp.
         if upload.payment_status != PaymentStatus.PAID:
             upload.payment_paid_at = datetime.now(timezone.utc)
         upload.payment_status = PaymentStatus.PAID
     else:
-        upload.payment_status = PaymentStatus.PARTIALLY_PAID
+        if recomputed > 0 or not unpaid_when_zero:
+            upload.payment_status = PaymentStatus.PARTIALLY_PAID
+        else:
+            upload.payment_status = PaymentStatus.UNPAID
         # A recompute that drops below the total (e.g. a payment txn was
         # deleted) reopens a previously-paid cycle; clear the stale paid-at.
         upload.payment_paid_at = None
@@ -505,6 +463,27 @@ async def _latest_active_cycle(
     # older row would double-count.
     latest = latest_per_account(list(candidates))
     return latest[0] if latest else None
+
+
+async def resync_tracked_cc_payment_state(session, upload: StatementUpload) -> bool:
+    """Re-derive an ALREADY-TRACKED statement's paid state from current credits.
+
+    For the reparse self-heal. Recomputes only an ACTIVE cycle (unpaid /
+    partially_paid / late). A PAID statement is left untouched, so a manual
+    "Mark as Paid" — which sets PAID with no backing credit — is never silently
+    reverted to unpaid by a recompute that finds zero qualifying credits.
+    Returns True if it recomputed. The caller owns the commit.
+    """
+    if upload.payment_status not in ACTIVE_STATUSES:
+        return False
+    if upload.total_amount_due is None:
+        return False
+    try:
+        parse_cc_amount(upload.total_amount_due)
+    except ValueError, InvalidOperation:
+        return False
+    await recompute_cc_payment_state(session, upload, unpaid_when_zero=True)
+    return True
 
 
 async def recompute_cc_payment_for_account(session, account_id: int) -> Decimal | None:
