@@ -585,6 +585,9 @@ async def statement_settle_sms(
     await session.rollback()
 
     async with session.begin():
+        upload = await session.get(StatementUpload, upload_id)
+        if upload is None:
+            return RedirectResponse(url="/statements", status_code=303)
         sms = await session.get(SmsMessage, sms_id)
         if sms is None:
             return _fail("Payment SMS not found.")
