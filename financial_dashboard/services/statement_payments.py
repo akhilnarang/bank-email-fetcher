@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bank_sms_parser import ParseError, UnsupportedSmsTypeError, parse_sms
@@ -156,7 +156,7 @@ async def _pending_payments(
         window.start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
     )
     conditions = [
-        SmsMessage.bank == account.bank,
+        func.lower(SmsMessage.bank) == account.bank.lower(),
         SmsMessage.transaction_id.is_(None),
         SmsMessage.received_at >= lower,
     ]
@@ -295,7 +295,7 @@ async def is_settleable_provisional(
     account = await session.get(Account, upload.account_id)
     if account is None or account.type != "credit_card":
         return False
-    if sms.bank != account.bank:
+    if sms.bank.casefold() != account.bank.casefold():
         return False
     parsed = _parse_provisional_cc_payment(sms)
     if parsed is None:
