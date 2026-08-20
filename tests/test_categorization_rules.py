@@ -61,6 +61,32 @@ def test_interest_channel():
     assert r is not None and r.slug == "interest"
 
 
+def test_fd_booking_is_investment():
+    # The statement parser labels an FD booking counterparty "<Bank> FD".
+    r = match_rules(_f(cp="IDFC FD", direction="debit"), CFG)
+    assert r is not None and r.slug == "investment"
+
+
+def test_fd_maturity_is_redemption():
+    r = match_rules(_f(cp="Slice FD", direction="credit"), CFG)
+    assert r is not None and r.slug == "investment_redemption"
+
+
+def test_fd_maturity_beats_interest_channel():
+    # A maturity row carries the "interest" channel, but the whole credit is a
+    # redemption. The FD rule must win over the interest shortcut.
+    r = match_rules(_f(cp="IDFC FD", channel="interest", direction="credit"), CFG)
+    assert r is not None and r.slug == "investment_redemption"
+
+
+def test_fd_labels_are_an_explicit_set():
+    # Only the parser-assigned "<Bank> FD" labels count. A beneficiary that
+    # merely ends in " FD" (or "FD") must NOT be read as an investment.
+    assert match_rules(_f(cp="ICICI FD", direction="debit"), CFG).slug == "investment"
+    assert match_rules(_f(cp="ACME FD", direction="debit"), CFG) is None
+    assert match_rules(_f(cp="ACMEFD", direction="debit"), CFG) is None
+
+
 def test_email_type_cc_payment_received_with_blank_fields():
     # CC payment/refund SMS alerts have no counterparty/narration; key off email_type.
     fields = {"counterparty": None, "raw_description": None, "direction": "credit"}
