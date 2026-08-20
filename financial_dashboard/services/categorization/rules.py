@@ -26,6 +26,18 @@ from financial_dashboard.services.settings import get_self_identifier_tokens
 
 RULESET_VERSION = "rules-v1"
 
+# Counterparty labels the statement/SMS parsers assign to a fixed-deposit
+# booking or maturity. An explicit set, not a " FD" suffix test, so an unrelated
+# beneficiary that merely ends in " FD" is never read as an investment. Add a
+# bank's label here when its parser starts emitting one.
+FD_COUNTERPARTIES = frozenset({"slice fd", "idfc fd", "icici fd"})
+
+
+def is_fd_counterparty(counterparty: str | None) -> bool:
+    """True when the counterparty is a parser-assigned fixed-deposit label."""
+    return (counterparty or "").strip().lower() in FD_COUNTERPARTIES
+
+
 # Narration evidence for the two things that can credit a credit card. Matched as
 # whole tokens (not bare substrings) so e.g. "cc payment" cannot fire on an
 # unrelated "...acc payment..." run of characters.
@@ -123,6 +135,16 @@ def match_rules(fields: dict, config: RuleConfig) -> RuleResult | None:
     cp_norm = normalize_counterparty(fields.get("counterparty"))
     channel = (fields.get("channel") or "").lower()
     direction = (fields.get("direction") or "").lower()
+
+    # Fixed-deposit legs. The statement/SMS parser labels the counterparty
+    # "<Bank> FD" for an FD booking or maturity. A debit is money INTO the
+    # deposit (a contribution); a credit is the matured principal returning.
+    # This runs ABOVE the interest shortcut: a maturity credit carries the
+    # "interest" channel, but the whole row is a redemption, not income.
+    if is_fd_counterparty(fields.get("counterparty")):
+        if direction == "credit":
+            return RuleResult("investment_redemption", 0.95)
+        return RuleResult("investment", 0.95)
 
     # A "spent on ... credit card" alert is a SPEND (purchase), never a payment
     # toward a card bill — guard so cc-payment merchant rules don't mislabel it.

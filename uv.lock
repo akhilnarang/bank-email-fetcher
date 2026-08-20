@@ -55,7 +55,7 @@ dependencies = [
 [[package]]
 name = "bank-sms-parser"
 version = "0.1.0"
-source = { git = "https://github.com/akhilnarang/bank-sms-parser#927eefc97ad56abcf13f2ea141d42eada7c266e8" }
+source = { git = "https://github.com/akhilnarang/bank-sms-parser#c69b9c0b9dbf40ca74d62fe3bb4df04a5e9aec4c" }
 dependencies = [
     { name = "pydantic" },
     { name = "python-dateutil" },
@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "bank-statement-parser"
 version = "0.1.0"
-source = { git = "https://github.com/akhilnarang/bank-statement-parser#3992db4f34ab7db97a34deff3ddaf5143ebcfe6f" }
+source = { git = "https://github.com/akhilnarang/bank-statement-parser#bf27190e85e8cd11a7374e39948e5b16c2fdde82" }
 dependencies = [
     { name = "pdfplumber" },
     { name = "pydantic" },

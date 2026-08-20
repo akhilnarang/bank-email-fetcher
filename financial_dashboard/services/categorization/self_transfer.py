@@ -9,6 +9,7 @@ from financial_dashboard.services.categorization.hashing import (
     build_input_payload,
     compute_input_hash,
 )
+from financial_dashboard.services.categorization.rules import is_fd_counterparty
 from financial_dashboard.services.categorization.vocabulary import get_vocab_version
 
 REFERENCE_PAIR_RULESET_VERSION = "reference-pair-v1"
@@ -100,6 +101,15 @@ async def apply_reference_self_transfer_rule(
 
     Returns whether at least one opposite-direction leg was found.
     """
+    # A fixed-deposit booking or maturity is the account holder's own money but
+    # is an investment, not a self-transfer. It can carry a statement reference
+    # (e.g. slice "<rrn>-Deposit"), so an FD leg must never be marked here. Guard
+    # BOTH roles: the caller (below) and any match (in the filter), so the FD is
+    # protected whichever leg triggers the rule. This rule is authoritative and
+    # would otherwise overwrite even a manual FD category.
+    if is_fd_counterparty(txn.counterparty):
+        return False
+
     reference_number = txn.reference_number
     opposite = _OPPOSITE_DIRECTION.get(txn.direction)
     if not reference_number or not reference_number.strip() or opposite is None:
@@ -113,6 +123,7 @@ async def apply_reference_self_transfer_rule(
         match
         for match in (await session.scalars(stmt)).all()
         if _different_accounts(txn, match)
+        and not is_fd_counterparty(match.counterparty)
     ]
     if not matches:
         return False

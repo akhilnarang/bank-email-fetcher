@@ -83,6 +83,67 @@ async def test_ingest_matching_opposite_reference_marks_both_legs(
     _assert_reference_rule(credit)
 
 
+async def test_fd_counterparty_is_never_self_transfer(session: AsyncSession):
+    # A slice FD booking carries a statement reference and could match an
+    # opposite-direction row in another account, but an FD is an investment, not
+    # a self-transfer. The authoritative rule must skip an FD-labeled row.
+    credit = _transaction(
+        bank="idfc",
+        direction="credit",
+        reference_number="900000000001",
+        account_mask="XX1234",
+    )
+    session.add(credit)
+    fd = _transaction(
+        bank="slice",
+        direction="debit",
+        reference_number="900000000001",
+        account_mask="XX5678",
+    )
+    fd.counterparty = "Slice FD"
+    session.add(fd)
+    await session.flush()
+
+    paired = await apply_reference_self_transfer_rule(session, fd)
+
+    assert paired is False
+    assert fd.category != "self_transfer"
+    assert credit.category != "self_transfer"
+
+
+async def test_fd_match_is_not_self_transferred_reverse_order(session: AsyncSession):
+    # Reverse order: the FD debit is stored first (already a manual investment),
+    # then a non-FD credit with the same reference is processed as the caller.
+    # The FD must be excluded from the matches so it is never overwritten.
+    fd = _transaction(
+        bank="slice",
+        direction="debit",
+        reference_number="900000000002",
+        account_mask="XX5678",
+    )
+    fd.counterparty = "Slice FD"
+    fd.category = "investment"
+    fd.category_method = "manual"
+    session.add(fd)
+    await session.flush()
+
+    credit = _transaction(
+        bank="idfc",
+        direction="credit",
+        reference_number="900000000002",
+        account_mask="XX1234",
+    )
+    session.add(credit)
+    await session.flush()
+
+    paired = await apply_reference_self_transfer_rule(session, credit)
+
+    assert paired is False
+    assert fd.category == "investment"
+    assert fd.category_method == "manual"
+    assert credit.category != "self_transfer"
+
+
 async def test_same_direction_reference_does_not_pair(session: AsyncSession):
     first = _transaction(
         bank="hdfc", direction="debit", reference_number="619445758035"

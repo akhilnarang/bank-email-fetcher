@@ -48,6 +48,7 @@ from financial_dashboard.core.dates import parse_date
 from financial_dashboard.core.masks import mask_last4
 from financial_dashboard.integrations.parsers import parse_bank_statement_pdf
 from financial_dashboard.services.linker import build_link_context, link_transaction
+from financial_dashboard.services.categorization.rules import is_fd_counterparty
 from financial_dashboard.services.categorization.self_transfer import (
     apply_reference_self_transfer_rule,
 )
@@ -948,7 +949,18 @@ async def enrich_matched_transactions(recon: dict) -> int:
                 continue
 
             existing = (txn.counterparty or "").strip()
-            if existing and existing.lower() not in _GENERIC_COUNTERPARTIES:
+            # An existing, non-generic counterparty is authoritative and kept.
+            # The one exception is migrating the "Self" placeholder to a
+            # "<Bank> FD" label: FD rows first imported as "Self" must pick up
+            # the label that protects them from the reference-pair self-transfer
+            # rule. A real name is never overwritten, even by an FD-labeled
+            # re-parse that reconciliation matched on date/amount alone.
+            fd_upgrade = is_fd_counterparty(new_value) and existing.lower() == "self"
+            if (
+                existing
+                and existing.lower() not in _GENERIC_COUNTERPARTIES
+                and not fd_upgrade
+            ):
                 continue
 
             txn.counterparty = new_value
