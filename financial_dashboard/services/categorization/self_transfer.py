@@ -107,7 +107,7 @@ async def apply_reference_self_transfer_rule(
     # BOTH roles: the caller (below) and any match (in the filter), so the FD is
     # protected whichever leg triggers the rule. This rule is authoritative and
     # would otherwise overwrite even a manual FD category.
-    if is_fd_counterparty(txn.counterparty):
+    if is_fd_counterparty(txn.counterparty, txn.bank):
         return False
 
     reference_number = txn.reference_number
@@ -123,7 +123,7 @@ async def apply_reference_self_transfer_rule(
         match
         for match in (await session.scalars(stmt)).all()
         if _different_accounts(txn, match)
-        and not is_fd_counterparty(match.counterparty)
+        and not is_fd_counterparty(match.counterparty, match.bank)
     ]
     if not matches:
         return False

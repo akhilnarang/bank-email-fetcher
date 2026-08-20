@@ -26,16 +26,20 @@ from financial_dashboard.services.settings import get_self_identifier_tokens
 
 RULESET_VERSION = "rules-v1"
 
-# Counterparty labels the statement/SMS parsers assign to a fixed-deposit
-# booking or maturity. An explicit set, not a " FD" suffix test, so an unrelated
-# beneficiary that merely ends in " FD" is never read as an investment. Add a
-# bank's label here when its parser starts emitting one.
-FD_COUNTERPARTIES = frozenset({"slice fd", "idfc fd", "icici fd"})
 
+def is_fd_counterparty(counterparty: str | None, bank: str | None) -> bool:
+    """True when the counterparty is the parser's "<Bank> FD" fixed-deposit label.
 
-def is_fd_counterparty(counterparty: str | None) -> bool:
-    """True when the counterparty is a parser-assigned fixed-deposit label."""
-    return (counterparty or "").strip().lower() in FD_COUNTERPARTIES
+    The label is the row's own bank name plus " FD" (an ``idfc`` row is labeled
+    "IDFC FD"), so it is derived from the bank — no hardcoded list, and it
+    self-extends to any bank whose parser emits the label. It is also stricter
+    than a " FD" suffix test: an unrelated "ACME FD" never matches, because it is
+    not "<this row's bank> FD".
+    """
+    bank_norm = (bank or "").strip().lower()
+    if not bank_norm:
+        return False
+    return (counterparty or "").strip().lower() == f"{bank_norm} fd"
 
 
 # Narration evidence for the two things that can credit a credit card. Matched as
@@ -141,7 +145,7 @@ def match_rules(fields: dict, config: RuleConfig) -> RuleResult | None:
     # deposit (a contribution); a credit is the matured principal returning.
     # This runs ABOVE the interest shortcut: a maturity credit carries the
     # "interest" channel, but the whole row is a redemption, not income.
-    if is_fd_counterparty(fields.get("counterparty")):
+    if is_fd_counterparty(fields.get("counterparty"), fields.get("bank")):
         if direction == "credit":
             return RuleResult("investment_redemption", 0.95)
         return RuleResult("investment", 0.95)

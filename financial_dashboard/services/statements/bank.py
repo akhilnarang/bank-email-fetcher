@@ -955,7 +955,9 @@ async def enrich_matched_transactions(recon: dict) -> int:
             # the label that protects them from the reference-pair self-transfer
             # rule. A real name is never overwritten, even by an FD-labeled
             # re-parse that reconciliation matched on date/amount alone.
-            fd_upgrade = is_fd_counterparty(new_value) and existing.lower() == "self"
+            fd_upgrade = (
+                is_fd_counterparty(new_value, txn.bank) and existing.lower() == "self"
+            )
             if (
                 existing
                 and existing.lower() not in _GENERIC_COUNTERPARTIES

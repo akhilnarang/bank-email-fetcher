@@ -97,6 +97,8 @@ async def categorize_one(
         "direction": txn.direction,
         "amount": str(txn.amount),
         "currency": txn.currency or "INR",
+        # The bank identifies a "<Bank> FD" fixed-deposit counterparty label.
+        "bank": txn.bank,
         # None when the transaction has no linked account. The rules layer needs
         # it: what a credit can possibly mean depends on the account it lands on.
         "account_type": account_type,

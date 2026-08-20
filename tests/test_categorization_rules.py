@@ -22,12 +22,13 @@ CFG = default_rule_config()._replace(
 )
 
 
-def _f(cp=None, raw=None, channel=None, direction="debit"):
+def _f(cp=None, raw=None, channel=None, direction="debit", bank=None):
     return {
         "counterparty": cp,
         "raw_description": raw,
         "channel": channel,
         "direction": direction,
+        "bank": bank,
     }
 
 
@@ -62,29 +63,35 @@ def test_interest_channel():
 
 
 def test_fd_booking_is_investment():
-    # The statement parser labels an FD booking counterparty "<Bank> FD".
-    r = match_rules(_f(cp="IDFC FD", direction="debit"), CFG)
+    # The parser labels an FD booking "<Bank> FD" — the row's own bank plus " FD".
+    r = match_rules(_f(cp="IDFC FD", direction="debit", bank="idfc"), CFG)
     assert r is not None and r.slug == "investment"
 
 
 def test_fd_maturity_is_redemption():
-    r = match_rules(_f(cp="Slice FD", direction="credit"), CFG)
+    r = match_rules(_f(cp="Slice FD", direction="credit", bank="slice"), CFG)
     assert r is not None and r.slug == "investment_redemption"
 
 
 def test_fd_maturity_beats_interest_channel():
     # A maturity row carries the "interest" channel, but the whole credit is a
     # redemption. The FD rule must win over the interest shortcut.
-    r = match_rules(_f(cp="IDFC FD", channel="interest", direction="credit"), CFG)
+    r = match_rules(
+        _f(cp="IDFC FD", channel="interest", direction="credit", bank="idfc"), CFG
+    )
     assert r is not None and r.slug == "investment_redemption"
 
 
-def test_fd_labels_are_an_explicit_set():
-    # Only the parser-assigned "<Bank> FD" labels count. A beneficiary that
-    # merely ends in " FD" (or "FD") must NOT be read as an investment.
-    assert match_rules(_f(cp="ICICI FD", direction="debit"), CFG).slug == "investment"
-    assert match_rules(_f(cp="ACME FD", direction="debit"), CFG) is None
-    assert match_rules(_f(cp="ACMEFD", direction="debit"), CFG) is None
+def test_fd_label_is_derived_from_the_row_bank():
+    # The label must be the row's OWN bank plus " FD". An unrelated beneficiary
+    # ending in " FD", or a label naming a different bank, must NOT match.
+    assert (
+        match_rules(_f(cp="ICICI FD", direction="debit", bank="icici"), CFG).slug
+        == "investment"
+    )
+    assert match_rules(_f(cp="ACME FD", direction="debit", bank="idfc"), CFG) is None
+    assert match_rules(_f(cp="IDFC FD", direction="debit", bank="slice"), CFG) is None
+    assert match_rules(_f(cp="ACMEFD", direction="debit", bank="idfc"), CFG) is None
 
 
 def test_email_type_cc_payment_received_with_blank_fields():
