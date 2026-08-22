@@ -85,6 +85,115 @@ async def test_sms_parse_preview_projects_insert_without_writes(
     )
 
 
+async def test_sms_parse_preview_projects_completion_without_writes(
+    client, session, monkeypatch
+):
+    """A completion leg previews as 'completion' with its target row, not as an
+    insert/match/defer from the matcher. The preview writes nothing."""
+    primary = Transaction(
+        bank="synthetic-bank",
+        email_type="synthetic_debit_alert",
+        direction="debit",
+        amount=Decimal("12.34"),
+        currency="INR",
+        transaction_date=datetime.date(2030, 1, 2),
+        channel="neft",
+        account_mask="XX000",
+        reference_number=None,
+        source="sms",
+    )
+    session.add(primary)
+    sms = await _sms(session)
+    await session.commit()
+
+    def _completion(*_args, **_kwargs):
+        return ParsedSms(
+            bank="synthetic-bank",
+            email_type="synthetic_neft_completion",
+            ledger_role="completion",
+            transaction=SmsTransactionAlert(
+                direction="debit",
+                amount=Money(amount=Decimal("12.34"), currency="INR"),
+                transaction_date=datetime.date(2030, 1, 2),
+                transaction_time=datetime.time(10, 30),
+                reference_number="INFULLREF0001",
+                channel="neft",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "financial_dashboard.services.parse_previews.parse_sms", _completion
+    )
+    statements: list[str] = []
+    bind = session.get_bind()
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement.strip().lower())
+
+    event.listen(bind, "before_cursor_execute", record_statement)
+    try:
+        response = await client.post(f"/api/sms/{sms.id}/parse-preview")
+    finally:
+        event.remove(bind, "before_cursor_execute", record_statement)
+
+    assert response.status_code == 200, response.text
+    merge = response.json()["merge"]
+    assert merge["action"] == "completion"
+    assert merge["target_transaction_id"] == primary.id
+    assert "reference_number" in merge["changed_fields"]
+    assert not any(
+        statement.startswith(("insert", "update", "delete")) for statement in statements
+    )
+
+
+async def test_sms_parse_preview_completion_already_linked_reports_no_change(
+    client, session, monkeypatch
+):
+    """A reparse preview of an already-completed leg must match execution: keep
+    the linked target and report no change, not a phantom reference change."""
+    primary = Transaction(
+        bank="synthetic-bank",
+        email_type="synthetic_debit_alert",
+        direction="debit",
+        amount=Decimal("12.34"),
+        currency="INR",
+        transaction_date=datetime.date(2030, 1, 2),
+        channel="neft",
+        account_mask="XX000",
+        reference_number="INFULLREF0001",
+        source="sms",
+    )
+    session.add(primary)
+    await session.flush()
+    sms = await _sms(session, transaction_id=primary.id)
+    await session.commit()
+
+    def _completion(*_args, **_kwargs):
+        return ParsedSms(
+            bank="synthetic-bank",
+            email_type="synthetic_neft_completion",
+            ledger_role="completion",
+            transaction=SmsTransactionAlert(
+                direction="debit",
+                amount=Money(amount=Decimal("12.34"), currency="INR"),
+                transaction_date=datetime.date(2030, 1, 2),
+                transaction_time=datetime.time(10, 30),
+                reference_number="INFULLREF0001",
+                channel="neft",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "financial_dashboard.services.parse_previews.parse_sms", _completion
+    )
+    response = await client.post(f"/api/sms/{sms.id}/parse-preview")
+    assert response.status_code == 200, response.text
+    merge = response.json()["merge"]
+    assert merge["action"] == "completion"
+    assert merge["target_transaction_id"] == primary.id
+    assert merge["changed_fields"] == []
+
+
 async def test_sms_parse_preview_reports_linked_identity_conflict(
     client, session, monkeypatch
 ):

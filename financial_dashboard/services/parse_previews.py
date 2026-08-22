@@ -20,8 +20,10 @@ from financial_dashboard.schemas import sms as sms_schemas
 from financial_dashboard.schemas.parse_previews import MatchEvidencePreview
 from financial_dashboard.services.emails import _process_email_full
 from financial_dashboard.services.sms_pipeline import (
+    COMPLETION_ROLE,
     DECLINED_DIRECTION,
     NOTIFY_ONLY_ROLES,
+    _find_completion_primary,
     parsed_sms_to_txn_data,
 )
 from financial_dashboard.services.txn_merge import (
@@ -43,6 +45,7 @@ MergePreviewAction = Literal[
     "match",
     "insert",
     "defer",
+    "completion",
 ]
 
 
@@ -240,11 +243,47 @@ async def preview_sms_parse(
         merge = _empty_merge("notify_only")
     elif txn_data["direction"] == DECLINED_DIRECTION:
         merge = _empty_merge("declined")
+    elif parsed.ledger_role == COMPLETION_ROLE:
+        # A completion leg does not enter the matcher. It stamps its reference
+        # onto the one matching primary row, or skips. Project that, so the
+        # preview matches execution instead of reporting insert/match/defer.
+        reference = (txn_data.get("reference_number") or "").strip()
+        if linked is not None and (linked.reference_number or "").strip() == reference:
+            # Already completed. A reparse keeps the link and changes nothing,
+            # so the preview must too — do not report a phantom change.
+            merge = sms_schemas.SmsMergePreview(
+                action="completion",
+                target_transaction_id=linked.id,
+                match_kind=None,
+                changed_fields=[],
+                identity_conflicts=[],
+                match_evidence=None,
+            )
+        else:
+            with session.no_autoflush:
+                primary, _count = await _find_completion_primary(session, txn_data)
+            changed = ["reference_number"] if primary is not None else []
+            if (
+                primary is not None
+                and primary.counterparty is None
+                and txn_data.get("counterparty")
+            ):
+                changed.append("counterparty")
+            merge = sms_schemas.SmsMergePreview(
+                action="completion",
+                target_transaction_id=primary.id if primary is not None else None,
+                match_kind=None,
+                changed_fields=changed,
+                identity_conflicts=[],
+                match_evidence=None,
+            )
     else:
         conflicts = _identity_conflicts(linked, txn_data) if linked is not None else []
         evidence = MatchEvidence()
         with session.no_autoflush:
-            decision = await find_match(session, txn_data, "sms", evidence=evidence)
+            decision = await find_match(
+                session, txn_data, "sms", evidence=evidence, source_id=sms.id
+            )
         diff = (
             compute_applied_enrichment_diff(
                 decision.transaction,

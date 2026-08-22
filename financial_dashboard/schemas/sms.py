@@ -119,6 +119,7 @@ class SmsMergePreview(BaseModel):
         "match",
         "insert",
         "defer",
+        "completion",
     ]
     target_transaction_id: int | None
     match_kind: Annotated[str | None, Field(max_length=32)]
