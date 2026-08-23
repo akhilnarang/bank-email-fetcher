@@ -14,6 +14,8 @@ from financial_dashboard.schemas.common import DatabaseId
 from financial_dashboard.schemas.transactions import (
     TransactionCategoryResponse,
     TransactionCategoryUpdate,
+    TransactionExcludeResponse,
+    TransactionExcludeUpdate,
     TransactionNoteResponse,
     TransactionNoteUpdate,
     TransactionRelinkResponse,
@@ -27,6 +29,7 @@ from financial_dashboard.services.transaction_reads import (
 from financial_dashboard.services.transactions import (
     RelinkError,
     relink_transaction,
+    set_transaction_excluded,
     update_transaction_category,
     update_transaction_note,
 )
@@ -135,6 +138,22 @@ async def update_category(
 
     if ok:
         return TransactionCategoryResponse(ok=True, category=category)
+
+    raise NotFoundException(detail="Transaction not found")
+
+
+@router.post("/transactions/{txn_id}/exclude")
+async def update_exclude(
+    txn_id: Annotated[DatabaseId, Path()],
+    payload: TransactionExcludeUpdate,
+    session: AsyncSessionDep,
+) -> TransactionExcludeResponse:
+    """Set whether one transaction is dropped from the cashflow report."""
+    ok, state = await set_transaction_excluded(
+        session, txn_id, payload.exclude_from_cashflow
+    )
+    if ok:
+        return TransactionExcludeResponse(ok=True, exclude_from_cashflow=state)
 
     raise NotFoundException(detail="Transaction not found")
 

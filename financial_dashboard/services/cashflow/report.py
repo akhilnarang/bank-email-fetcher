@@ -90,6 +90,15 @@ BANK_INTERNAL_SLUGS = tuple(internal_slugs_for_scope(REPORT_SCOPE))
 INR_OR_NULL = Transaction.currency.is_(None) | (Transaction.currency == "INR")
 NON_INR = Transaction.currency.is_not(None) & (Transaction.currency != "INR")
 
+# INCLUDED and EXCLUDED split the rows on the exclude flag. Every cashflow
+# figure filters to INCLUDED. Only the Excluded footnote reads EXCLUDED, so a
+# flagged row is still counted and shown. `is_not(True)` keeps a legacy NULL in,
+# because a NULL row is not flagged. `is_(True)` selects the flagged rows alone.
+# The Undated footnote does not filter. An excluded row with no date is in no
+# range, so the Undated line is the only place it shows.
+INCLUDED = Transaction.exclude_from_cashflow.is_not(True)
+EXCLUDED = Transaction.exclude_from_cashflow.is_(True)
+
 SIGNED_FLOW = func.sum(
     case(
         (Transaction.direction == "credit", Transaction.amount),
@@ -222,7 +231,7 @@ async def cashflow_summary(
                 SIGNED_FLOW,
                 ROW_COUNT,
             )
-            .where(in_range, INR_OR_NULL, BANK_SCOPE)
+            .where(in_range, INR_OR_NULL, BANK_SCOPE, INCLUDED)
             .group_by(Transaction.category, Transaction.direction)
         )
     ).all()
@@ -335,6 +344,7 @@ async def _transfers_in(
                 in_range,
                 INR_OR_NULL,
                 BANK_SCOPE,
+                INCLUDED,
                 Transaction.category == TRANSFERS_IN_SLUG,
             )
             .group_by(NORMALIZED_COUNTERPARTY)
@@ -383,7 +393,7 @@ async def _uncategorized(
     rows = (
         await session.execute(
             select(NORMALIZED_CATEGORY, SIGNED_FLOW, ROW_COUNT)
-            .where(in_range, BANK_SCOPE, UNCATEGORIZED)
+            .where(in_range, BANK_SCOPE, INCLUDED, UNCATEGORIZED)
             .group_by(NORMALIZED_CATEGORY)
         )
     ).all()
@@ -427,7 +437,7 @@ async def _expense_detail(
     rows = (
         await session.execute(
             select(Transaction.category, SIGNED_FLOW, ROW_COUNT)
-            .where(in_range, INR_OR_NULL)
+            .where(in_range, INR_OR_NULL, INCLUDED)
             .group_by(Transaction.category)
         )
     ).all()
@@ -468,12 +478,15 @@ async def _footnotes(session: AsyncSession, in_range: ColumnElement[bool]) -> Fo
             select(ROW_COUNT, func.sum(Transaction.amount), SIGNED_FLOW).where(
                 in_range,
                 BANK_SCOPE,
+                INCLUDED,
                 Transaction.category.in_(BANK_INTERNAL_SLUGS),
             )
         )
     ).one()
     non_inr_count = (
-        await session.execute(select(ROW_COUNT).where(in_range, BANK_SCOPE, NON_INR))
+        await session.execute(
+            select(ROW_COUNT).where(in_range, BANK_SCOPE, INCLUDED, NON_INR)
+        )
     ).scalar_one()
     # Undated rows match no range, so this figure is range-independent. It stays
     # global for the same reason: a row with no date is a data problem wherever it
@@ -485,14 +498,25 @@ async def _footnotes(session: AsyncSession, in_range: ColumnElement[bool]) -> Fo
     ).one()
     unaccounted_count, unaccounted_net = (
         await session.execute(
-            select(ROW_COUNT, SIGNED_FLOW).where(in_range, UNACCOUNTED_SCOPE)
+            select(ROW_COUNT, SIGNED_FLOW).where(in_range, INCLUDED, UNACCOUNTED_SCOPE)
         )
     ).one()
     # Family rows are excluded from every bucket; count them here so they stay visible.
     family_count, family_net = (
         await session.execute(
             select(ROW_COUNT, SIGNED_FLOW).where(
-                in_range, Transaction.category == FAMILY_SLUG
+                in_range, INCLUDED, Transaction.category == FAMILY_SLUG
+            )
+        )
+    ).one()
+    # The excluded rows, over every account in the range. This is the one figure
+    # that reads EXCLUDED, so a flagged row stays visible. It is currency-agnostic,
+    # so the count matches the `?excluded=1` drill. It carries a gross and a signed
+    # net. A reversal pair nets to zero, so the gross is the figure to read.
+    excluded_count, excluded_gross, excluded_net = (
+        await session.execute(
+            select(ROW_COUNT, func.sum(Transaction.amount), SIGNED_FLOW).where(
+                in_range, EXCLUDED
             )
         )
     ).one()
@@ -507,6 +531,9 @@ async def _footnotes(session: AsyncSession, in_range: ColumnElement[bool]) -> Fo
         unaccounted_net=_decimal(unaccounted_net),
         family_count=family_count,
         family_net=_decimal(family_net),
+        excluded_count=excluded_count,
+        excluded_gross=_decimal(excluded_gross),
+        excluded_net=_decimal(excluded_net),
     )
 
 
@@ -565,7 +592,7 @@ async def cashflow_trend(
                 Transaction.direction,
                 SIGNED_FLOW,
             )
-            .where(in_window, INR_OR_NULL, BANK_SCOPE)
+            .where(in_window, INR_OR_NULL, BANK_SCOPE, INCLUDED)
             .group_by(month_key, Transaction.category, Transaction.direction)
         )
     ).all()
@@ -580,7 +607,7 @@ async def cashflow_trend(
     salary_counts = (
         await session.execute(
             select(month_key, ROW_COUNT)
-            .where(in_window, BANK_SCOPE, Transaction.category == "salary")
+            .where(in_window, BANK_SCOPE, INCLUDED, Transaction.category == "salary")
             .group_by(month_key)
         )
     ).all()

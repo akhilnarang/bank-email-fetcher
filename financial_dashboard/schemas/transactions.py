@@ -25,6 +25,18 @@ class TransactionCategoryResponse(BaseModel):
     category: str | None = None
 
 
+class TransactionExcludeUpdate(BaseModel):
+    """Set the flag to a given value, not a toggle. A repeated request lands the
+    same state. It does not flip the state back."""
+
+    exclude_from_cashflow: bool
+
+
+class TransactionExcludeResponse(BaseModel):
+    ok: bool
+    exclude_from_cashflow: bool = False
+
+
 class TransactionRelinkUpdate(BaseModel):
     """Request body for manual relink. Either field may be null to clear
     the corresponding link. If only ``card_id`` is given, the service
@@ -67,6 +79,7 @@ class TransactionRead(BaseModel):
     source: str | None
     category: str | None
     category_method: str | None
+    exclude_from_cashflow: bool = False
     review_status: str | None
     created_at: datetime.datetime | None
     enriched_at: datetime.datetime | None

@@ -78,10 +78,13 @@
     carry the same currency clause: without it a foreign-currency row would be
     listed by a link whose figure never counted it. Uncategorized stays
     currency-agnostic, because a foreign row with no category is still one. -#}
-{% set bank_qs = range_qs ~ "&scope=bank" %}
-{% set core_qs = range_qs ~ "&non_inr=0&scope=bank" %}
-{% set detail_qs = range_qs ~ "&non_inr=0" %}
-{% set unaccounted_qs = range_qs ~ "&scope=unaccounted" %}
+{#- Every headline figure skips the flagged rows. So each drill carries
+    `excluded=0` to list the same rows. The Undated line and the Excluded line
+    below do not. -#}
+{% set bank_qs = range_qs ~ "&scope=bank&excluded=0" %}
+{% set core_qs = range_qs ~ "&non_inr=0&scope=bank&excluded=0" %}
+{% set detail_qs = range_qs ~ "&non_inr=0&excluded=0" %}
+{% set unaccounted_qs = range_qs ~ "&scope=unaccounted&excluded=0" %}
 {% set fn = summary.footnotes %}
 {#- What makes a range non-empty is anything the page has something to say about,
     not merely the headline buckets: a range holding only a categorized
@@ -94,7 +97,7 @@
                   + summary.transfers_in.count + summary.uncategorized.count
                   + summary.expense_detail.count
                   + fn.internal_count + fn.non_inr_count + fn.unaccounted_count
-                  + fn.family_count %}
+                  + fn.family_count + fn.excluded_count %}
 
 <div class="section-header">
     <div>
@@ -487,7 +490,7 @@
                         well as their bank transfer), so this drill carries the range
                         only, no scope. Excluded from every headline bucket on purpose;
                         the net is a running family position, not a term in any identity. -#}
-                    <td><a href="/transactions?category=family&amp;{{ range_qs }}">Family</a></td>
+                    <td><a href="/transactions?category=family&amp;{{ range_qs }}&amp;excluded=0">Family</a></td>
                     <td class="text-sm text-muted">{{ fn.family_count }} txns &middot; family money that moved through your accounts &middot; not your income or spending &middot; net {{ fn.family_net|inr_exact }} (rough)</td>
                 </tr>
                 <tr data-footnote="non_inr">
@@ -509,6 +512,15 @@
                     <td><a href="/transactions?undated=1">Undated rows</a></td>
                     <td class="text-sm text-muted">{{ fn.undated_count }} txns &middot; no transaction date, so in no range &middot; net {{ fn.undated_net|inr_exact }} (rough figure &mdash; may mix currencies)</td>
                 </tr>
+                {% if fn.excluded_count %}
+                <tr data-footnote="excluded">
+                    {#- Rows flagged out of the cashflow, over every account in the range.
+                        `excluded=1` lists these. A reversal pair nets to zero, so read
+                        the gross. -#}
+                    <td><a href="/transactions?excluded=1&amp;{{ range_qs }}">Manually excluded</a></td>
+                    <td class="text-sm text-muted">{{ fn.excluded_count }} txns &middot; flagged out of the figures above &middot; gross {{ fn.excluded_gross|inr_exact }} &middot; net {{ fn.excluded_net|inr_exact }} (rough figure &mdash; may mix currencies)</td>
+                </tr>
+                {% endif %}
             </tbody>
         </table>
     </div>

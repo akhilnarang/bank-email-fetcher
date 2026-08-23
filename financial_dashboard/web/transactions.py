@@ -268,6 +268,13 @@ async def transaction_list(
     undated: Annotated[
         str | None, Query(description="Set to 1 for rows with no transaction date")
     ] = None,
+    excluded: Annotated[
+        str | None,
+        Query(
+            description="1 for rows flagged out of the cashflow, 0 for rows still in "
+            "it; omit for no filter"
+        ),
+    ] = None,
     scope: Annotated[
         Scope | None,
         Query(
@@ -408,6 +415,14 @@ async def transaction_list(
         stmt = stmt.where(INR_OR_NULL)
     if undated == "1":
         stmt = stmt.where(Transaction.transaction_date.is_(None))
+    if excluded == "1":
+        # The rows the Excluded footnote counts. `is_(True)` selects the flagged
+        # rows alone. A legacy NULL is an unflagged row and stays out.
+        stmt = stmt.where(Transaction.exclude_from_cashflow.is_(True))
+    elif excluded == "0":
+        # The rows still in the cashflow. The report's figures sum these. Every
+        # headline drill carries this value, so a tile links to the rows it counted.
+        stmt = stmt.where(Transaction.exclude_from_cashflow.is_not(True))
     account_scope = scope_predicate(scope)
     if account_scope is not None:
         # The report's own predicate, imported rather than restated: a cash-basis
@@ -561,6 +576,7 @@ async def transaction_list(
         "internal": internal,
         "non_inr": non_inr,
         "undated": undated,
+        "excluded": excluded,
         # A drill param like any other, so paging and re-sorting keep it: a page-2
         # or newly-sorted link that dropped the scope would widen the listing to
         # every account while still claiming to be the figure's rows.

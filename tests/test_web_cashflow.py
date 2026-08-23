@@ -105,6 +105,7 @@ async def _add(
     dated=True,
     month=SEED_MONTH,
     account_id=LINKED_TO_BANK,
+    exclude_from_cashflow=False,
 ):
     """Seed one transaction the page can count.
 
@@ -125,6 +126,7 @@ async def _add(
             currency=currency,
             transaction_date=month.replace(day=day) if dated else None,
             account_id=account_id,
+            exclude_from_cashflow=exclude_from_cashflow,
         )
     )
     await session.commit()

@@ -632,6 +632,13 @@ class Transaction(Base):
     balance: Mapped[Decimal | None] = mapped_column(Numeric(precision=12, scale=2))
     raw_description: Mapped[str | None] = mapped_column(Text)
     note: Mapped[str | None] = mapped_column(Text)
+    exclude_from_cashflow: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    """True drops this row from the cashflow report. The row keeps its category.
+    The row stays in every other view. The cashflow figures skip it. The
+    "Excluded" footnote counts it. Use it for a row the category must not touch,
+    such as a reversal-and-redo pair, or money paid for someone and returned."""
     category: Mapped[str | None] = mapped_column(String)
     category_method: Mapped[str | None] = mapped_column(String)
     category_confidence: Mapped[float | None] = mapped_column(Float)

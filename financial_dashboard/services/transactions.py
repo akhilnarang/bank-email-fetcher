@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +44,30 @@ async def update_transaction_note(
     txn.note = cleaned or None
     await session.commit()
     return True, cleaned
+
+
+class ExcludeResult(NamedTuple):
+    ok: bool
+    exclude_from_cashflow: bool
+
+
+async def set_transaction_excluded(
+    session: AsyncSession,
+    txn_id: int,
+    excluded: bool,
+) -> ExcludeResult:
+    """Set whether one transaction is dropped from the cashflow.
+
+    Set the state to the given value. A repeated request lands the same value. It
+    does not toggle. The row keeps its category and every other view. Only the
+    cashflow report reads this flag. ``ok`` is False when no such row exists.
+    """
+    txn = await session.get(Transaction, txn_id)
+    if txn is None:
+        return ExcludeResult(ok=False, exclude_from_cashflow=False)
+    txn.exclude_from_cashflow = excluded
+    await session.commit()
+    return ExcludeResult(ok=True, exclude_from_cashflow=excluded)
 
 
 async def update_transaction_category(

@@ -204,6 +204,28 @@ class Footnotes(BaseModel):
             "position, not expected to net to zero. Rough figure; may mix currencies."
         ),
     )
+    excluded_count: int = Field(
+        default=0,
+        description=(
+            "Rows flagged out of the cashflow in the range, over all accounts. The "
+            "figures above drop them. This line counts them so they stay visible. An "
+            "undated flagged row is in no range and shows in the Undated line."
+        ),
+    )
+    excluded_gross: Decimal = Field(
+        default=Decimal(0),
+        description=(
+            "Gross (unsigned) amount of the excluded rows. Read this when a flagged "
+            "pair nets to zero. Rough figure. It may mix currencies."
+        ),
+    )
+    excluded_net: Decimal = Field(
+        default=Decimal(0),
+        description=(
+            "Signed net flow of the excluded rows (credits positive). Rough figure. "
+            "It may mix currencies."
+        ),
+    )
 
 
 class CashflowSummary(BaseModel):

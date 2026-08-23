@@ -610,6 +610,7 @@ erDiagram
         decimal balance
         text raw_description
         text note
+        boolean exclude_from_cashflow
         string category
         string category_method
         float category_confidence

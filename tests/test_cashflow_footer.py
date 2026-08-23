@@ -360,6 +360,70 @@ async def test_family_excluded_from_buckets_and_counted_in_its_footnote(
     assert _count(_region(page, "data-footnote", "internal")) == 0
 
 
+async def test_excluded_row_dropped_from_buckets_and_counted_in_its_footnote(
+    client, session
+):
+    """A flagged row leaves every figure above. The Excluded footnote counts it.
+    Its drill lists only that row."""
+    await _add(session, amount="90000", direction="credit", category="salary")
+    await _add(session, amount="5000", direction="debit", category="dining")
+    # A flagged expense. It leaves the expense bucket. Only the footnote holds it.
+    await _add(
+        session,
+        amount="24995",
+        direction="debit",
+        category="shopping",
+        exclude_from_cashflow=True,
+    )
+
+    page = (await client.get(f"/cashflow?{RANGE}")).text
+
+    # The expense bucket holds the dining row. The flagged row is gone.
+    expense = _region(page, "data-section", "expense")
+    assert "₹5,000.00" in expense
+    assert "24,995" not in expense
+    # The income decoy stays. Only the flagged row changes.
+    assert "₹90,000.00" in _region(page, "data-section", "income")
+
+    # The footnote counts it. Its drill returns only the flagged row.
+    row = _region(page, "data-footnote", "excluded")
+    listing = await _listed(client, row)
+    assert listing.count(DETAIL) == _count(row) == 1
+    assert "24,995.00" in listing
+    # The in-cashflow rows are not in the excluded drill.
+    assert "5,000.00" not in listing
+    assert "90,000.00" not in listing
+
+
+async def test_excluded_undated_row_stays_in_undated_not_the_excluded_footnote(
+    client, session
+):
+    """The Undated footnote does not filter flagged rows. An excluded row with no
+    date shows there. It does not show in the Excluded footnote. The Excluded
+    footnote is range-scoped, and an undated row is in no range."""
+    await _add(session, amount="5000", direction="debit", category="dining")
+    await _add(
+        session,
+        amount="24995",
+        direction="debit",
+        category="shopping",
+        dated=False,
+        exclude_from_cashflow=True,
+    )
+
+    page = (await client.get(f"/cashflow?{RANGE}")).text
+
+    # The Undated footnote shows it. Its rangeless drill lists only that row.
+    row = _region(page, "data-footnote", "undated")
+    listing = await _listed(client, row)
+    assert "24,995.00" in listing
+    assert _count(row) == listing.count(DETAIL) == 1
+
+    # No flagged row is in range. So the Excluded footnote does not render. The
+    # Undated footnote counts the undated one.
+    assert 'data-footnote="excluded"' not in page
+
+
 async def test_reimbursement_credit_nets_against_spend(client, session):
     """A reimbursement credit reduces Spent (contra-expense) and is not income."""
     await _add(session, amount="5000", direction="debit", category="dining")

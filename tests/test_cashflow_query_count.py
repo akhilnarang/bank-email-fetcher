@@ -27,9 +27,9 @@ pytestmark = pytest.mark.anyio
 RANGE = "date_from=2026-06-01&date_to=2026-06-30"
 
 # What the summary costs: the grouped bank-side bucket scan, the all-account
-# expense detail, transfers-in, uncategorized, and the five footnote reads
-# (internal, non-INR, undated, unaccounted, family).
-SUMMARY_QUERIES = 9
+# expense detail, transfers-in, uncategorized, and the six footnote reads
+# (internal, non-INR, undated, unaccounted, family, manually-excluded).
+SUMMARY_QUERIES = 10
 # What the trend costs: the month/category/direction scan and the salary counts.
 TREND_QUERIES = 2
 
