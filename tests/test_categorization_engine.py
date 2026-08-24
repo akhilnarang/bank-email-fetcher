@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from financial_dashboard.db.models import Transaction
 from financial_dashboard.services.categorization import engine as eng
-from financial_dashboard.services.categorization import gemini as gem
+from financial_dashboard.services.categorization import llm
 
 pytestmark = pytest.mark.anyio
 
@@ -56,7 +56,7 @@ async def test_llm_low_confidence_routes_to_review(session: AsyncSession, monkey
     await ensure_category(session, "groceries")
 
     async def fake_classify(**kwargs):
-        return gem.GeminiResult("groceries", 0.10, "unsure")
+        return llm.LlmResult("groceries", 0.10, "unsure")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 
@@ -89,7 +89,7 @@ async def test_llm_direction_flip_routes_to_review(session: AsyncSession, monkey
 
     async def fake_classify(**kwargs):
         # 'refund' is an income slug; on a debit it's impossible.
-        return gem.GeminiResult("refund", 0.95, "looks like a refund")
+        return llm.LlmResult("refund", 0.95, "looks like a refund")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 

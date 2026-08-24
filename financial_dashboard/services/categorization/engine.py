@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from financial_dashboard.db.models import Account, Transaction, utc_now
 from financial_dashboard.services.categorization import gemini, openai_provider
 from financial_dashboard.services.categorization.fewshot import get_similar_examples
-from financial_dashboard.services.categorization.gemini import NEEDS_REVIEW
+from financial_dashboard.services.categorization.llm import NEEDS_REVIEW, LlmResult
 from financial_dashboard.services.categorization.hashing import (
     build_input_payload,
     compute_input_hash,
@@ -49,7 +49,7 @@ def _active_model_name() -> str:
     return get_setting("gemini.model") or gemini.MODEL_DEFAULT
 
 
-async def _llm_classify(*, fields, examples, active_slugs) -> gemini.GeminiResult:
+async def _llm_classify(*, fields, examples, active_slugs) -> LlmResult:
     # Thin indirection so tests can monkeypatch the network call.
     provider = get_setting("categorization.llm_provider") or "gemini"
     name_tokens = get_redact_name_tokens()

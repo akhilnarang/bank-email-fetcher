@@ -1,7 +1,6 @@
 """OpenAI-compatible structured-output classifier (LLM fallback).
 
-Reuses build_prompt and parse_result from gemini.py — the prompt format and
-result parsing are provider-agnostic.
+Transport only. The prompt, the result type, and the parser live in llm.py.
 """
 
 import json
@@ -10,8 +9,9 @@ from collections.abc import Mapping, Sequence
 from openai import AsyncOpenAI
 
 from financial_dashboard.services.categorization.fewshot import FewShotExample
-from financial_dashboard.services.categorization.gemini import (
-    GeminiResult,
+from financial_dashboard.services.categorization.llm import (
+    LLM_TIMEOUT_MS,
+    LlmResult,
     build_prompt,
     parse_result,
 )
@@ -26,15 +26,16 @@ async def classify(
     model: str,
     base_url: str,
     name_tokens: Sequence[str] = (),
-) -> GeminiResult:
+) -> LlmResult:
     prompt = build_prompt(
         fields=fields,
         examples=examples,
         active_slugs=active_slugs,
         name_tokens=name_tokens,
     )
-    # 30s cap so a slow provider can't stall the poll loop once enabled.
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=30.0)
+    client = AsyncOpenAI(
+        api_key=api_key, base_url=base_url or None, timeout=LLM_TIMEOUT_MS / 1000
+    )
     response = await client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],

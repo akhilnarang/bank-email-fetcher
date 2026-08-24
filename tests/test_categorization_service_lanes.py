@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import financial_dashboard.services.categorization.engine as eng
 import financial_dashboard.services.categorization.sweep as sweep
 from financial_dashboard.db.models import Account, Transaction
-from financial_dashboard.services.categorization import gemini as gem
+from financial_dashboard.services.categorization import llm
 from financial_dashboard.services.categorization.merchant_rules import (
     load_merchant_rules,
 )
@@ -101,7 +101,7 @@ async def test_polarity_flips_directionally_impossible_llm_slug_and_queues_for_r
     await ensure_category(session, "refund")
 
     async def fake_classify(**kwargs):
-        return gem.GeminiResult("refund", 0.95, "looks like a refund")
+        return llm.LlmResult("refund", 0.95, "looks like a refund")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 
@@ -133,7 +133,7 @@ async def test_polarity_keeps_directionally_consistent_llm_slug(
     await ensure_category(session, "groceries")
 
     async def fake_classify(**kwargs):
-        return gem.GeminiResult("groceries", 0.95, "grocery store")
+        return llm.LlmResult("groceries", 0.95, "grocery store")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 
@@ -362,7 +362,7 @@ async def test_llm_low_confidence_routes_to_review_at_the_model_boundary(
     async def fake_classify(*, fields, examples, active_slugs):
         captured["fields"] = fields
         captured["active_slugs"] = active_slugs
-        return gem.GeminiResult("groceries", 0.10, "unsure")
+        return llm.LlmResult("groceries", 0.10, "unsure")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 
@@ -398,7 +398,7 @@ async def test_llm_needs_review_slug_routes_to_review(
     category, and the engine never stores the sentinel slug itself."""
 
     async def fake_classify(**kwargs):
-        return gem.GeminiResult(gem.NEEDS_REVIEW, 0.0, "no fit")
+        return llm.LlmResult(llm.NEEDS_REVIEW, 0.0, "no fit")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 
@@ -417,7 +417,7 @@ async def test_llm_needs_review_slug_routes_to_review(
     assert method == "llm"
     assert txn.category == "expense"  # debit + unknown default
     assert txn.review_status == "pending"
-    assert txn.category != gem.NEEDS_REVIEW
+    assert txn.category != llm.NEEDS_REVIEW
 
 
 async def test_empty_input_skips_the_llm_call(session: AsyncSession, monkeypatch):

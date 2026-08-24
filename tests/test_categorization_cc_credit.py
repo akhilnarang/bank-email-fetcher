@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from financial_dashboard.db.models import Account, Transaction
 from financial_dashboard.services.categorization import engine as eng
-from financial_dashboard.services.categorization import gemini as gem
+from financial_dashboard.services.categorization import llm
 from financial_dashboard.services.categorization.merchant_defaults import (
     DEFAULT_MERCHANT_RULES,
 )
@@ -166,7 +166,7 @@ async def test_engine_card_credit_llm_cannot_produce_repayment(
     await ensure_category(session, "repayment")
 
     async def fake_classify(**kwargs):
-        return gem.GeminiResult("repayment", 0.95, "looks like money coming back")
+        return llm.LlmResult("repayment", 0.95, "looks like money coming back")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 
@@ -192,7 +192,7 @@ async def test_engine_bank_credit_unexplained_still_repayment(
     await session.flush()
 
     async def fake_classify(**kwargs):
-        return gem.GeminiResult("repayment", 0.95, "friend paid me back")
+        return llm.LlmResult("repayment", 0.95, "friend paid me back")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 

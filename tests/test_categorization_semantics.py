@@ -42,7 +42,7 @@ from financial_dashboard.services.cashflow.buckets import (
     bucket_for_slug,
 )
 from financial_dashboard.services.categorization import engine as eng
-from financial_dashboard.services.categorization import gemini as gem
+from financial_dashboard.services.categorization import llm
 from financial_dashboard.services.categorization.polarity import (
     EXPENSE_SLUGS,
     INCOME_SLUGS,
@@ -475,7 +475,7 @@ async def test_engine_llm_fee_charges_on_credit_is_flipped_to_repayment(
     await session.flush()
 
     async def fake_classify(**kwargs):
-        return gem.GeminiResult("fees_charges", 0.95, "looks like a fee credit")
+        return llm.LlmResult("fees_charges", 0.95, "looks like a fee credit")
 
     monkeypatch.setattr(eng, "_llm_classify", fake_classify)
 

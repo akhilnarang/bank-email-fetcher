@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from financial_dashboard.services.categorization.gemini import (
-    GeminiResult,
+from financial_dashboard.services.categorization.llm import (
     NEEDS_REVIEW,
+    LlmResult,
 )
 
 pytestmark = pytest.mark.anyio
@@ -68,7 +68,7 @@ async def test_classify_known_slug(monkeypatch):
         base_url="",
     )
 
-    assert result == GeminiResult(slug="groceries", confidence=0.9, reason="food store")
+    assert result == LlmResult(slug="groceries", confidence=0.9, reason="food store")
     mock_create.assert_awaited_once()
 
 
@@ -185,7 +185,7 @@ async def test_engine_dispatches_to_openai_provider(monkeypatch):
     async def fake_openai_classify(**kwargs):
         nonlocal openai_called
         openai_called = True
-        return GeminiResult("groceries", 0.9, "test")
+        return LlmResult("groceries", 0.9, "test")
 
     monkeypatch.setattr(eng.openai_provider, "classify", fake_openai_classify)
 
@@ -213,7 +213,7 @@ async def test_engine_dispatches_to_gemini_by_default(monkeypatch):
     async def fake_gemini_classify(**kwargs):
         nonlocal gemini_called
         gemini_called = True
-        return GeminiResult("dining", 0.85, "restaurant")
+        return LlmResult("dining", 0.85, "restaurant")
 
     monkeypatch.setattr(eng.gemini, "classify", fake_gemini_classify)
 
@@ -240,7 +240,7 @@ async def test_engine_dispatches_to_gemini_when_explicitly_set(monkeypatch):
     async def fake_gemini_classify(**kwargs):
         nonlocal gemini_called
         gemini_called = True
-        return GeminiResult("dining", 0.85, "restaurant")
+        return LlmResult("dining", 0.85, "restaurant")
 
     monkeypatch.setattr(eng.gemini, "classify", fake_gemini_classify)
 

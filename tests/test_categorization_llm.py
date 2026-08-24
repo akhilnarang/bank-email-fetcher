@@ -1,6 +1,6 @@
-from financial_dashboard.services.categorization.gemini import (
+from financial_dashboard.services.categorization.llm import (
     NEEDS_REVIEW,
-    GeminiResult,
+    LlmResult,
     build_prompt,
     parse_result,
 )
@@ -66,7 +66,7 @@ def test_parse_result_clamps_and_defaults():
     r = parse_result(
         {"category": "groceries", "confidence": 1.5, "reason": "x"}, ["groceries"]
     )
-    assert isinstance(r, GeminiResult)
+    assert isinstance(r, LlmResult)
     assert r.slug == "groceries" and r.confidence == 1.0
     # unknown slug → needs_review
     bad = parse_result(
