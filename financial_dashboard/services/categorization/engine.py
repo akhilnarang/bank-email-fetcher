@@ -61,6 +61,7 @@ async def _llm_classify(*, fields, examples, active_slugs) -> LlmResult:
             api_key=get_openai_api_key(),
             model=get_setting("openai.model") or "gpt-4o-mini",
             base_url=get_openai_base_url(),
+            reasoning_effort=get_setting("openai.reasoning_effort") or "",
             name_tokens=name_tokens,
         )
     return await gemini.classify(

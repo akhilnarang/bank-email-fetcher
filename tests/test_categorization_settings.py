@@ -22,8 +22,11 @@ def test_categorization_settings_registered():
         "categorization.self_identifiers",
         "categorization.hidden_identifiers",
         "category_vocab_version",
+        "openai.model",
+        "openai.reasoning_effort",
     ):
         assert key in SETTINGS_REGISTRY, key
+    assert SETTINGS_REGISTRY["openai.reasoning_effort"].internal is False
     assert SETTINGS_REGISTRY["gemini.api_key"].secret is True
     # old keys must be gone
     assert "categorization.self_names" not in SETTINGS_REGISTRY
@@ -75,3 +78,22 @@ def test_vocab_version_is_internal_and_not_form_editable():
     # a (stale) form value for it must NOT produce an update that could roll it back
     updates, errors = parse_form_updates({"category_vocab_version": "1"})
     assert "category_vocab_version" not in updates
+
+
+def test_reasoning_effort_accepts_a_valid_level():
+    updates, errors = parse_form_updates({"openai.reasoning_effort": "medium"})
+    assert errors == []
+    assert updates["openai.reasoning_effort"] == "medium"
+
+
+def test_reasoning_effort_rejects_an_unknown_level():
+    """A typo here would fail every categorization call, so reject it on save."""
+    updates, errors = parse_form_updates({"openai.reasoning_effort": "meduim"})
+    assert any("Reasoning Effort" in e for e in errors)
+    assert "openai.reasoning_effort" not in updates
+
+
+def test_reasoning_effort_accepts_empty_for_a_plain_model():
+    updates, errors = parse_form_updates({"openai.reasoning_effort": ""})
+    assert errors == []
+    assert updates["openai.reasoning_effort"] == ""

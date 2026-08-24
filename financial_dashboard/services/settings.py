@@ -31,6 +31,7 @@ class SettingDef:
     description: str = ""
     secret: bool = False
     internal: bool = False  # not shown in the settings UI; never set via the form
+    choices: tuple[str, ...] = ()  # allowed values; empty means free text
 
 
 SETTINGS_REGISTRY: dict[str, SettingDef] = {
@@ -170,6 +171,15 @@ SETTINGS_REGISTRY: dict[str, SettingDef] = {
         category="Categorization",
         label="OpenAI Base URL",
         description="OpenAI-compatible endpoint, e.g. https://host/openai/v1",
+    ),
+    "openai.reasoning_effort": SettingDef(
+        default="",
+        data_type="str",
+        category="Categorization",
+        label="OpenAI Reasoning Effort",
+        description="low, medium or high. Set this for a reasoning model, which "
+        "refuses an explicit temperature. Leave empty for all other models.",
+        choices=("low", "medium", "high"),
     ),
     "categorization.llm_provider": SettingDef(
         default="gemini",
@@ -430,6 +440,11 @@ def parse_form_updates(
                                 f"{defn.label}: must be comma-separated numbers"
                             )
                             continue
+                if defn.choices and raw and raw not in defn.choices:
+                    errors.append(
+                        f"{defn.label}: must be one of {', '.join(defn.choices)}"
+                    )
+                    continue
                 updates[key] = raw
     return updates, errors
 
