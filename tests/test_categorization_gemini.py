@@ -25,6 +25,43 @@ def test_prompt_lists_slugs_and_redacts():
     assert "9876543210" not in prompt
 
 
+def test_prompt_flags_dr_cr_as_a_direction_marker_for_banks_with_the_bug():
+    for bank in ("indusind", "idfc", "sbi", "uboi"):
+        prompt = build_prompt(
+            fields={
+                "bank": bank,
+                "counterparty": "someone@axl",
+                "raw_description": "UPI/1234567890/DR/NAME/HDFC/someone@axl",
+                "direction": "debit",
+                "channel": "upi",
+                "amount": "500",
+                "currency": "INR",
+            },
+            examples=[],
+            active_slugs=["groceries", "dining"],
+        )
+        assert "format note" in prompt
+        assert "debit or credit" in prompt
+        assert "healthcare" in prompt
+
+
+def test_prompt_has_no_format_note_for_a_bank_without_a_hint():
+    prompt = build_prompt(
+        fields={
+            "bank": "hdfc",
+            "counterparty": "someone@axl",
+            "raw_description": "some narration",
+            "direction": "debit",
+            "channel": "upi",
+            "amount": "500",
+            "currency": "INR",
+        },
+        examples=[],
+        active_slugs=["groceries", "dining"],
+    )
+    assert "format note" not in prompt
+
+
 def test_parse_result_clamps_and_defaults():
     r = parse_result(
         {"category": "groceries", "confidence": 1.5, "reason": "x"}, ["groceries"]

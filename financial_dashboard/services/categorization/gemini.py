@@ -37,6 +37,37 @@ class GeminiResult(NamedTuple):
     reason: str
 
 
+# A short, evidenced note per bank on how to read its raw narration codes.
+# Only add a bank here once a real sample shows the model needs the help --
+# do not guess a format. Keyed by fields["bank"] (the same slug the parsers
+# use), so it lines up with whichever bank produced the raw_description.
+BANK_NARRATION_HINTS: dict[str, str] = {
+    "indusind": (
+        "IndusInd UPI descriptions look like "
+        "'UPI/<ref>/DR|CR/<name>/<bank-code>/<vpa>'. DR/CR marks debit or "
+        "credit here. It is not part of a name, and it does not mean doctor "
+        "or healthcare."
+    ),
+    "idfc": (
+        "IDFC UPI descriptions look like 'UPI/DR|CR/<ref>/<name>/<vpa>/"
+        "<bank-code>/<note>'. DR/CR marks debit or credit here. It is not "
+        "part of a name, and it does not mean doctor or healthcare."
+    ),
+    "sbi": (
+        "SBI UPI descriptions look like "
+        "'UPI/DR|CR/<ref>/<name>/<bank-code>/<vpa>/<remark>'. DR/CR marks "
+        "debit or credit here. It is not part of a name, and it does not "
+        "mean doctor or healthcare."
+    ),
+    "uboi": (
+        "Union Bank UPI descriptions look like "
+        "'UPIAB|UPIAR/<ref>/DR|CR/<name>/<bank-code>/<vpa>'. DR/CR marks "
+        "debit or credit here. It is not part of a name, and it does not "
+        "mean doctor or healthcare."
+    ),
+}
+
+
 def _sanitize_counterparty(text: str | None, name_tokens: Sequence[str]) -> str:
     """Counterparty: strip numbers (PII) then mask configured name tokens."""
     return redact_names(redact_pii(text), name_tokens)
@@ -84,6 +115,8 @@ def build_prompt(
     lines.append(f"direction: {fields.get('direction')}")
     lines.append(f"amount: {fields.get('amount')} {fields.get('currency')}")
     lines.append(f"channel: {fields.get('channel')}")
+    if hint := BANK_NARRATION_HINTS.get(fields.get("bank") or ""):
+        lines.append(f"format note: {hint}")
     lines.append(
         f"counterparty: {_sanitize_counterparty(fields.get('counterparty'), name_tokens)}"
     )
