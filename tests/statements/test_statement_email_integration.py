@@ -712,6 +712,63 @@ async def test_bank_ref_first_match_takes_priority(maker, statements_dir, monkey
 
 
 @pytest.mark.anyio
+async def test_bank_enrichment_marker_reaches_the_stored_reconciliation(
+    maker, statements_dir, monkeypatch
+):
+    """The statement page reads its enrichment badge from the stored JSON.
+
+    Enrichment marks the rows it changed, so it must run before the
+    reconciliation is serialized. Otherwise the row is enriched but the page
+    shows nothing.
+    """
+    import financial_dashboard.services.statements.bank as bank_module
+
+    acc_id = await h.add_bank_account(maker)
+    async with maker() as session:
+        session.add(
+            Transaction(
+                account_id=acc_id,
+                bank="hdfc",
+                email_type="sms",
+                direction="credit",
+                amount=Decimal("2000.00"),
+                transaction_date=datetime.date(2026, 4, 14),
+                counterparty="Mobile XXXXXXXXX006",
+            )
+        )
+        await session.commit()
+
+    parsed = h.bank_parsed(
+        transactions=[
+            h.bank_txn(
+                date="14/04/2026",
+                amount="2,000.00",
+                transaction_type="credit",
+                counterparty="ANJALIJY OTESHNA",
+                narration="IMPS/1234/ANJALIJY OTESHNA/HDFC/Selftransfer",
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        bank_module, "_parse_pdf_bytes_sync", h.make_bank_parser(parsed)
+    )
+    raw = h.email_with_pdf(subject="Account statement")
+    await process_bank_statement_email("hdfc", raw, "Account statement")
+
+    async with maker() as session:
+        upload = (await session.execute(select(BankStatementUpload))).scalars().one()
+        import json
+
+        recon = json.loads(upload.reconciliation_data)
+        assert any(m.get("enriched") for m in recon["matched"])
+
+        txn = (await session.execute(select(Transaction))).scalars().first()
+        assert txn is not None
+        assert txn.counterparty == "ANJALIJY OTESHNA"
+        assert txn.raw_description == "IMPS/1234/ANJALIJY OTESHNA/HDFC/Selftransfer"
+
+
+@pytest.mark.anyio
 async def test_bank_narration_ref_rescue(maker, statements_dir, monkeypatch):
     """DB ref embedded in statement narration rescues an otherwise
     ref-disagreement case."""

@@ -75,7 +75,7 @@ async def test_reparse_fd_label_does_not_overwrite_real_name(maker):
         await s.commit()
         row_id = row.id
 
-    enriched = await enrich_matched_transactions(
+    await enrich_matched_transactions(
         {
             "matched": [
                 {
@@ -87,6 +87,7 @@ async def test_reparse_fd_label_does_not_overwrite_real_name(maker):
         }
     )
 
-    assert enriched == 0
+    # The count is not the subject: the row still gains the narration it had no
+    # other source for. What must hold is that the real name survives.
     async with maker() as s:
         assert (await s.get(Transaction, row_id)).counterparty == "ACME CORP"

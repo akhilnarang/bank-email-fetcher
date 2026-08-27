@@ -9,8 +9,8 @@ Parallel to statements.py (which handles CC statements). Provides:
   existing DB transactions by (date, amount, direction) with ±1-day
   tolerance and optional reference_number matching.
 
-- enrich_matched_transactions(): writes statement narration back to
-  the DB counterparty field for matched transactions.
+- enrich_matched_transactions(): writes the statement counterparty and
+  narration back to matched DB transactions.
 
 - process_bank_statement_email(): end-to-end pipeline called by the
   fetcher fallback chain when CC statement processing returns None.
@@ -157,6 +157,15 @@ _BANK_RECONCILIATION_GATES = (
     "contention",
 )
 _GENERIC_COUNTERPARTIES = {"payment received", "payment successful", "payment done"}
+# A counterparty that is only a label and a mask, e.g. "Mobile XXXXXXXXX006",
+# "Acct xxxxxxxxxx8214" or a bare "xxxxxxxxxx8669". A mask names nobody. The
+# match must cover the whole value, so a counterparty that holds a mask AND a
+# name ("Acct XXXXXXX7703/AKHIL JYOT") stays authoritative. The trailing digits
+# are required: every mask keeps some of the number, so an X-run on its own is
+# not evidence of a mask and must not condemn a name.
+_MASK_ONLY_COUNTERPARTY = re.compile(
+    r"(?:mobile|acct|account)?\s*x{3,}\d+", re.IGNORECASE
+)
 
 
 class BankStatementProcessingError(Exception):
@@ -924,12 +933,30 @@ def reconcile_bank_statement(
     }
 
 
+def is_placeholder_counterparty(value: str) -> bool:
+    """Say whether a stored counterparty names nobody.
+
+    An SMS alert often identifies the other party only by a mask, such as
+    "Mobile XXXXXXXXX006", or by a fixed phrase like "payment received". Both
+    carry no identity, so a real name from a statement must replace them.
+    """
+    cleaned = value.strip()
+    if cleaned.lower() in _GENERIC_COUNTERPARTIES:
+        return True
+    return bool(_MASK_ONLY_COUNTERPARTY.fullmatch(cleaned))
+
+
 async def enrich_matched_transactions(recon: dict) -> int:
-    """Update DB transaction counterparty from statement for matched transactions.
+    """Write the statement counterparty and narration onto matched DB rows.
 
     Prefers the parser-derived `counterparty` (clean merchant/beneficiary
     pulled out of structured narrations like UPI/MMT/IMPS) and falls back
     to the raw narration when the parser couldn't extract one.
+
+    The two fields are decided separately. A row can hold a real name and still
+    have no narration: an SMS alert carries no description at all, and the
+    statement is the only source that does. Returns the number of rows that
+    gained either field.
     """
     enriched = 0
     async with async_session() as session:
@@ -937,6 +964,8 @@ async def enrich_matched_transactions(recon: dict) -> int:
             counterparty = (entry.get("counterparty") or "").strip()
             narration = (entry.get("narration") or "").strip()
             new_value = counterparty or narration
+            # new_value falls back to narration, so an empty new_value means the
+            # entry carries neither field and there is nothing to write.
             if not new_value:
                 continue
 
@@ -948,8 +977,9 @@ async def enrich_matched_transactions(recon: dict) -> int:
             if not txn:
                 continue
 
+            changed = False
             existing = (txn.counterparty or "").strip()
-            # An existing, non-generic counterparty is authoritative and kept.
+            # An existing, identifying counterparty is authoritative and kept.
             # The one exception is migrating the "Self" placeholder to a
             # "<Bank> FD" label: FD rows first imported as "Self" must pick up
             # the label that protects them from the reference-pair self-transfer
@@ -958,16 +988,27 @@ async def enrich_matched_transactions(recon: dict) -> int:
             fd_upgrade = (
                 is_fd_counterparty(new_value, txn.bank) and existing.lower() == "self"
             )
-            if (
-                existing
-                and existing.lower() not in _GENERIC_COUNTERPARTIES
-                and not fd_upgrade
-            ):
-                continue
+            # A counterparty is written only from the parser-derived value. That
+            # the parser found a party is the evidence that the value names one.
+            # A raw narration can be a channel label such as "MOBILE BANKING",
+            # which names nobody and would then look authoritative and block any
+            # later name. The narration still reaches raw_description either way.
+            writes_name = bool(counterparty) and (
+                not existing or is_placeholder_counterparty(existing)
+            )
+            if new_value != existing and (writes_name or fd_upgrade):
+                txn.counterparty = new_value
+                changed = True
 
-            txn.counterparty = new_value
-            enriched += 1
-            entry["enriched"] = True
+            # The statement narration is the only description these rows ever
+            # get. Fill it when absent; never overwrite one already stored.
+            if narration and not (txn.raw_description or "").strip():
+                txn.raw_description = narration
+                changed = True
+
+            if changed:
+                enriched += 1
+                entry["enriched"] = True
 
         if enriched:
             await session.commit()
@@ -1409,6 +1450,12 @@ async def process_bank_statement_email(
 
     recon = reconcile_bank_statement(parsed, list(db_txns), account.id)
 
+    # Enrich before the reconciliation is stored. Enrichment marks the rows it
+    # changed, and the statement page reads those markers from the stored
+    # reconciliation, so the two must be written together. It runs on its own
+    # session, which must commit before the session below holds a dirty upload.
+    enriched = await enrich_matched_transactions(recon)
+
     # Save the PDF to disk
     STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d_%H%M%S")
@@ -1491,8 +1538,8 @@ async def process_bank_statement_email(
         await session.commit()
         upload_id = upload.id
 
-    # Notifications and enrichment run outside the DB session so that network
-    # I/O doesn't hold the session open.
+    # Notifications run outside the DB session so that network I/O does not
+    # hold the session open.
     if imported_txns and should_notify_transactions():
         chat_id = get_telegram_chat_id()
         bulk_threshold = get_setting_int("telegram.bulk_threshold", 5)
@@ -1507,8 +1554,6 @@ async def process_bank_statement_email(
                 source="bank_statement",
                 txns=imported_txns,
             )
-
-    enriched = await enrich_matched_transactions(recon)
 
     duplicate_count, import_error_count, _skip_msg = import_skip_summary(recon)
     logger.info(
