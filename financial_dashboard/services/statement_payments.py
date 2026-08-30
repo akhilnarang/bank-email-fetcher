@@ -16,7 +16,8 @@ self-healing: no staging table to clean up.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
+from datetime import date as datetime_date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import func, select
@@ -39,7 +40,6 @@ from financial_dashboard.services.cc_disambiguation import (
     is_cc_payment_received_email,
 )
 from financial_dashboard.services.sms_pipeline import parsed_sms_to_txn_data
-from financial_dashboard.services.txn_merge import find_match
 from financial_dashboard.services.statements.cc import parse_cc_amount
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,28 @@ class PendingPayment:
     date: str
     card_mask: str
     available_limit: str | None
+
+
+# The email_type a credit carries when it was read off the statement PDF rather
+# than from a bank alert.
+_STATEMENT_CREDIT_EMAIL_TYPE = "cc_statement"
+
+# A bank settles a bill payment on its own schedule. HDFC has taken up to two
+# days, so a settlement is looked for on the provisional's day and the four
+# days after it.
+_SETTLEMENT_WINDOW_DAYS = 4
+
+# The category the classifier gives a credit that paid a card bill. A statement
+# also imports cashback and refund credits, and those settle nothing.
+_CARD_PAYMENT_CATEGORY = "credit_card_payment"
+
+
+class _Settlement(NamedTuple):
+    """A credit that could be the settlement of some provisional payment."""
+
+    amount: Decimal
+    card_last4: str
+    date: datetime_date | None
 
 
 @dataclass(frozen=True)
@@ -124,7 +146,6 @@ async def _pending_payments(
     session: AsyncSession,
     upload: StatementUpload,
     window: CycleWindow,
-    settled: list[SettledPayment],
 ) -> list[PendingPayment]:
     """Provisional bill-payment SMS for this card, not yet in the ledger.
 
@@ -136,8 +157,8 @@ async def _pending_payments(
 
     A provisional whose real settlement already landed must not show as pending.
     The settlement is a different SMS linked to its own credit row, so the
-    provisional stays unlinked. Suppress it only when the transaction matcher
-    confidently identifies a settled row from this statement cycle.
+    provisional stays unlinked. Suppress it only when a credit of the same
+    amount, on the same card, is dated inside the settlement window.
     """
     account = await session.get(Account, upload.account_id)
     if account is None:
@@ -147,10 +168,11 @@ async def _pending_payments(
     # day is IST. A payment near IST-midnight is stored on the adjacent UTC
     # date, so a tight UTC-midnight window would drop it. Pad the window by a
     # day on each edge to cover the ~5.5h skew. Over-inclusion is safe: a
-    # provisional pulled in from an adjacent cycle still needs a transaction
-    # identity match, a matching card, and ``transaction_id IS NULL``;
+    # provisional pulled in from an adjacent cycle still needs its own
+    # settlement to be absent;
     # the worst case is showing a genuinely-unsettled neighbour payment, which
-    # settling attributes to the correct cycle anyway.
+    # settling attributes to the correct cycle anyway. A row still needs a
+    # matching card and ``transaction_id IS NULL``.
     lower = datetime.combine(
         window.start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
     )
@@ -177,9 +199,7 @@ async def _pending_payments(
         .all()
     )
 
-    settled_ids = {row.txn_id for row in settled}
-
-    pending: list[PendingPayment] = []
+    candidates = []
     for sms in rows:
         parsed = _parse_provisional_cc_payment(sms)
         if parsed is None:
@@ -195,29 +215,207 @@ async def _pending_payments(
         # here. Confirm the parsed card belongs to this account's card set.
         if not _card_belongs_to_account(txn_data.get("card_mask"), account):
             continue
+        candidates.append((sms, txn_data))
 
-        decision = await find_match(session, txn_data, "sms")
-        if (
-            decision.action == "match"
-            and decision.transaction is not None
-            and decision.transaction.id in settled_ids
-        ):
+    settlements = await _settlements_for_suppression(
+        session, upload, window, await _provisional_sms_ids(session, upload, window)
+    )
+    hidden = _settled_sms_ids(candidates, settlements)
+
+    pending: list[PendingPayment] = []
+    for sms, txn_data in candidates:
+        if sms.id in hidden:
             continue
-
-        amount = _fmt_amount(txn_data["amount"])
-
         txn_date = txn_data.get("transaction_date")
         balance = txn_data.get("balance")
         pending.append(
             PendingPayment(
                 sms_id=sms.id,
-                amount=amount,
+                amount=_fmt_amount(txn_data["amount"]),
                 date=txn_date.isoformat() if txn_date else "",
                 card_mask=txn_data.get("card_mask") or "",
                 available_limit=_fmt_amount(balance) if balance is not None else None,
             )
         )
     return pending
+
+
+def _last4(value: str | None) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())[-4:]
+
+
+async def _provisional_sms_ids(
+    session: AsyncSession,
+    upload: StatementUpload,
+    window: CycleWindow,
+) -> set[int]:
+    """Every provisional payment SMS in the cycle, linked or not.
+
+    A provisional settled by hand becomes a linked credit. That credit must not
+    then be read as the settlement of some other provisional, so the ids are
+    needed whether or not the row still counts as pending.
+    """
+    account = await session.get(Account, upload.account_id)
+    if account is None:
+        return set()
+    lower = datetime.combine(
+        window.start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+    )
+    conditions = [
+        func.lower(SmsMessage.bank) == account.bank.lower(),
+        SmsMessage.received_at >= lower,
+    ]
+    if window.end is not None:
+        upper = datetime.combine(
+            window.end + timedelta(days=_SETTLEMENT_WINDOW_DAYS),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        conditions.append(SmsMessage.received_at < upper)
+
+    rows = (
+        (await session.execute(select(SmsMessage).where(*conditions))).scalars().all()
+    )
+    ids: set[int] = set()
+    for sms in rows:
+        parsed = _parse_provisional_cc_payment(sms)
+        if parsed is not None and parsed[1] == "provisional":
+            ids.add(sms.id)
+    return ids
+
+
+async def _settlements_for_suppression(
+    session: AsyncSession,
+    upload: StatementUpload,
+    window: CycleWindow,
+    provisional_sms_ids: set[int],
+) -> list[_Settlement]:
+    """Credits that could settle a provisional payment in this cycle.
+
+    Wider than the settled list the page shows. A payment can reach the ledger
+    as a bank alert or as a credit read off the statement PDF, and both mean the
+    money arrived. The displayed list keeps only the alerts, so it cannot answer
+    this question on its own.
+    """
+    # A payment made on the cycle's last day settles after the cycle closes, so
+    # the search runs past the end. The cycle predicate alone would miss it.
+    upper = None
+    if window.end is not None:
+        upper = window.end + timedelta(days=_SETTLEMENT_WINDOW_DAYS)
+    conditions = [
+        Transaction.account_id == upload.account_id,
+        Transaction.direction == "credit",
+        Transaction.transaction_date >= window.start - timedelta(days=1),
+    ]
+    if upper is not None:
+        conditions.append(Transaction.transaction_date < upper)
+
+    rows = (
+        (await session.execute(select(Transaction).where(*conditions))).scalars().all()
+    )
+
+    out: list[_Settlement] = []
+    for row in rows:
+        if is_cc_payment_received_email(row.email_type):
+            pass
+        elif (
+            row.email_type == _STATEMENT_CREDIT_EMAIL_TYPE
+            and row.category == _CARD_PAYMENT_CATEGORY
+        ):
+            # A statement imports cashback and refund credits too. Only the ones
+            # the classifier calls a card payment settle anything.
+            pass
+        else:
+            continue
+        if row.sms_message_id in provisional_sms_ids:
+            # This credit IS a provisional that somebody settled by hand. It
+            # cannot also be the settlement of a different provisional.
+            continue
+        out.append(
+            _Settlement(
+                amount=Decimal(str(row.amount)),
+                card_last4=_last4(row.card_mask),
+                date=row.transaction_date,
+            )
+        )
+    return out
+
+
+def _settled_sms_ids(candidates, settlements: list[_Settlement]) -> set[int]:
+    """Say which provisionals already have their settlement in the ledger.
+
+    Two provisionals for the same card and amount are indistinguishable, so the
+    decision is made per group. Every member must get its own credit, dated
+    inside that member's own window. A group where even one member goes without
+    stays wholly visible: one of them is genuinely unpaid, and hiding an
+    arbitrary one would hide the wrong payment half the time.
+    """
+    groups: dict[tuple, list] = {}
+    for sms, txn_data in candidates:
+        key = (_last4(txn_data.get("card_mask")), Decimal(str(txn_data["amount"])))
+        groups.setdefault(key, []).append((sms, txn_data))
+
+    unused = list(settlements)
+    hidden: set[int] = set()
+    for (card_last4, amount), members in sorted(groups.items()):
+        claimed = _claim_one_each(members, amount, card_last4, unused)
+        if claimed is None:
+            continue
+        for used in claimed:
+            unused.remove(used)
+        hidden.update(sms.id for sms, _ in members)
+    return hidden
+
+
+def _claim_one_each(members, amount, card_last4, unused):
+    """Give every member its own credit, or return None.
+
+    Members are taken oldest first, and each takes the earliest credit it can
+    use. A later member can only want a later credit, so taking the earliest
+    never denies one that a member behind it needed.
+    """
+    available = sorted(
+        (s for s in unused if s.amount == amount and _card_matches(card_last4, s)),
+        key=lambda s: (s.date is None, s.date),
+    )
+    claimed = []
+    for _, txn_data in sorted(
+        members,
+        key=lambda m: (
+            m[1].get("transaction_date") is None,
+            m[1].get("transaction_date"),
+        ),
+    ):
+        on = txn_data.get("transaction_date")
+        for candidate in available:
+            if _within_settlement_window(candidate.date, on):
+                claimed.append(candidate)
+                available.remove(candidate)
+                break
+        else:
+            return None
+    return claimed
+
+
+def _card_matches(card_last4: str, settlement: _Settlement) -> bool:
+    """A credit settles a card's payment only when both name that card.
+
+    An unknown last-4 on either side is not evidence of a match. Treating it as
+    one lets a second card's credit hide this card's payment.
+    """
+    return bool(card_last4) and card_last4 == settlement.card_last4
+
+
+def _within_settlement_window(settled_on, provisional_on) -> bool:
+    """True if a credit is dated on or just after the provisional.
+
+    A settlement never precedes the payment it settles, and the bank does not
+    take forever. An undated row on either side proves nothing, so it does not
+    match.
+    """
+    if settled_on is None or provisional_on is None:
+        return False
+    return 0 <= (settled_on - provisional_on).days <= _SETTLEMENT_WINDOW_DAYS
 
 
 def _parse_provisional_cc_payment(sms: SmsMessage):
@@ -316,7 +514,7 @@ async def build_payments_view(
     """
     window = await cc_cycle_window(session, upload)
     settled = await _settled_payments(session, upload, window)
-    pending = await _pending_payments(session, upload, window, settled)
+    pending = await _pending_payments(session, upload, window)
 
     remaining: str | None = None
     if upload.total_amount_due is not None:

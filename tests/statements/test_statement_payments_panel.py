@@ -206,7 +206,9 @@ async def test_two_same_amount_provisionals_both_pending(maker):
     assert {p.amount for p in view.pending} == {"30,000.00"}
 
 
-async def _add_settled_credit(maker, acc_id, *, amount, day=8):
+async def _add_settled_credit(
+    maker, acc_id, *, amount, day=8, ref="REF123", card_mask="1234"
+):
     """A real bank-settled CC-payment credit already in the ledger."""
     async with maker() as session:
         txn = Transaction(
@@ -217,7 +219,8 @@ async def _add_settled_credit(maker, acc_id, *, amount, day=8):
             amount=Decimal(str(amount)),
             transaction_date=datetime.date(2026, 8, day),
             counterparty="Payment",
-            reference_number="REF123",
+            reference_number=ref,
+            card_mask=card_mask,
         )
         session.add(txn)
         await session.commit()
@@ -225,8 +228,13 @@ async def _add_settled_credit(maker, acc_id, *, amount, day=8):
 
 
 @pytest.mark.anyio
-async def test_distinct_same_amount_settled_credit_keeps_provisional(maker):
-    """Amount equality alone does not hide a distinct pending payment."""
+async def test_a_settlement_the_next_day_hides_its_provisional(maker):
+    """The bank settles a day or two later. That is the normal shape.
+
+    The old code required the two to look simultaneous. That left completed
+    payments on the page. One provisional and one credit of the same amount,
+    on the same card, inside the settlement window, are the same payment.
+    """
     upload_id, acc_id = await _seed_open_statement(maker)
     await _add_provisional_sms(maker, day=7)
     await _add_settled_credit(maker, acc_id, amount="30000.00", day=8)
@@ -236,12 +244,95 @@ async def test_distinct_same_amount_settled_credit_keeps_provisional(maker):
         view = await build_payments_view(session, upload)
 
     assert len(view.settled) == 1
+    assert view.pending == []
+
+
+@pytest.mark.anyio
+async def test_a_credit_before_the_provisional_hides_nothing(maker):
+    """A settlement never precedes the payment it settles."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7)
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=6)
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
     assert len(view.pending) == 1
 
 
 @pytest.mark.anyio
+async def test_a_credit_long_after_the_provisional_hides_nothing(maker):
+    """Beyond the window the credit is a different payment."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7)
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=14)
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.pending) == 1
+
+
+@pytest.mark.anyio
+async def test_a_credit_read_off_the_statement_also_settles(maker):
+    """Some payments reach the ledger only as a statement credit.
+
+    They mean the money arrived just as much as a bank alert does, and the
+    displayed settled list excludes them, so they must be looked up separately.
+    """
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7)
+    async with maker() as session:
+        session.add(
+            Transaction(
+                account_id=acc_id,
+                bank="hdfc",
+                email_type="cc_statement",
+                direction="credit",
+                amount=Decimal("30000.00"),
+                transaction_date=datetime.date(2026, 8, 8),
+                counterparty="CC PAYMENT",
+                card_mask="1234",
+                category="credit_card_payment",
+            )
+        )
+        await session.commit()
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    # The statement credit is not a bank alert, so the page does not list it.
+    assert view.settled == []
+    assert view.pending == []
+
+
+@pytest.mark.anyio
+async def test_two_provisionals_and_two_settlements_hide_both(maker):
+    """Same amount twice is indistinguishable, but the counts agree."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7, minute=7)
+    await _add_provisional_sms(maker, day=7, minute=11)
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=8, ref="REF-A")
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=8, ref="REF-B")
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.settled) == 2
+    assert view.pending == []
+
+
+@pytest.mark.anyio
 async def test_two_provisionals_one_settled_keeps_both_pending(maker):
-    """An amount-only settled row does not hide either provisional."""
+    """One credit cannot settle two payments.
+
+    Which of the two it settled is unknowable, so neither is hidden. Hiding an
+    arbitrary one would hide a genuinely unpaid payment half the time.
+    """
     upload_id, acc_id = await _seed_open_statement(maker)
     await _add_provisional_sms(maker, day=7, minute=7)
     await _add_provisional_sms(maker, day=7, minute=11)
@@ -414,3 +505,75 @@ async def test_maskless_provisional_rejected_when_card_unmatched(maker):
     async with maker() as session:
         sms = await session.get(SmsMessage, other_id)
         assert await is_settleable_provisional(session, sms, upload) is False
+
+
+@pytest.mark.anyio
+async def test_a_credit_on_another_card_hides_nothing(maker):
+    """A second card's payment must not settle this card's."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7)
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=8, card_mask="9999")
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.pending) == 1
+
+
+@pytest.mark.anyio
+async def test_a_maskless_credit_hides_nothing(maker):
+    """An unknown card is not evidence. It must not settle anything."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7)
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=8, card_mask=None)
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.pending) == 1
+
+
+@pytest.mark.anyio
+async def test_a_statement_cashback_hides_nothing(maker):
+    """A statement imports cashback too. Cashback settles no bill."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=7)
+    async with maker() as session:
+        session.add(
+            Transaction(
+                account_id=acc_id,
+                bank="hdfc",
+                email_type="cc_statement",
+                direction="credit",
+                amount=Decimal("30000.00"),
+                transaction_date=datetime.date(2026, 8, 8),
+                counterparty="CARD CASHBACK CREDIT",
+                card_mask="1234",
+                category="cashback_rewards",
+            )
+        )
+        await session.commit()
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.pending) == 1
+
+
+@pytest.mark.anyio
+async def test_each_provisional_needs_its_own_dated_credit(maker):
+    """Two credits near the first payment do not settle a much later one."""
+    upload_id, acc_id = await _seed_open_statement(maker)
+    await _add_provisional_sms(maker, day=5)
+    await _add_provisional_sms(maker, day=14)
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=6, ref="REF-A")
+    await _add_settled_credit(maker, acc_id, amount="30000.00", day=7, ref="REF-B")
+
+    upload = await _get_upload(maker, upload_id)
+    async with maker() as session:
+        view = await build_payments_view(session, upload)
+
+    assert len(view.pending) == 2
