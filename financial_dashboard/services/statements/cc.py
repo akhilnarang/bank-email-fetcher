@@ -255,17 +255,41 @@ def _match_key(txn_date: date_type, amount: Decimal, direction: str) -> tuple:
 INTERNAL_TRANSFER_CREDIT_REASONS = frozenset({"emi_installment_transfer"})
 
 
-def is_internal_transfer_credit(txn: "ParsedCcTransaction") -> bool:
+def _ledger_twin_key(txn: "ParsedCcTransaction") -> tuple[str, str, str]:
+    return (txn.date, txn.amount, txn.narration.upper())
+
+
+def internal_transfer_debit_keys(
+    debits: list["ParsedCcTransaction"],
+) -> frozenset[tuple[str, str, str]]:
+    """The keys a tagged credit must match to count as an internal transfer.
+
+    The tag alone is not proof. cc-parser sets it from the narration, and
+    only treats the row as a transfer when a debit twin with the same date,
+    amount and narration exists. A tagged credit with no twin is a real
+    credit, such as a reversed instalment, and must stay a transaction.
+    """
+    return frozenset(_ledger_twin_key(txn) for txn in debits)
+
+
+def is_internal_transfer_credit(
+    txn: "ParsedCcTransaction",
+    debit_keys: frozenset[tuple[str, str, str]],
+) -> bool:
     """True when a parsed credit row is a bank-internal ledger transfer.
 
     Args:
         txn: A cc-parser credit row from ``parsed.payments_refunds``.
+        debit_keys: Twin keys of the statement's debit rows, from
+            ``internal_transfer_debit_keys``.
 
     Returns:
-        True when ``credit_reasons`` names an internal transfer.
+        True when ``credit_reasons`` names an internal transfer and a debit
+        twin exists on the same statement.
     """
-    return (getattr(txn, "credit_reasons", None) or "") in (
-        INTERNAL_TRANSFER_CREDIT_REASONS
+    return (
+        txn.credit_reasons in INTERNAL_TRANSFER_CREDIT_REASONS
+        and _ledger_twin_key(txn) in debit_keys
     )
 
 
@@ -524,10 +548,11 @@ def reconcile_statement(
     stmt_txns = []
     for txn in parsed.transactions or []:
         stmt_txns.append(("transactions", "debit", txn))
+    debit_keys = internal_transfer_debit_keys(parsed.transactions or [])
     for txn in parsed.payments_refunds or []:
         # Not a candidate-set predicate: the row is dropped as a non-transaction
         # before any DB lookup, so it can neither match nor import.
-        if is_internal_transfer_credit(txn):
+        if is_internal_transfer_credit(txn, debit_keys):
             continue
         stmt_txns.append(("payments_refunds", "credit", txn))
 

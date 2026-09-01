@@ -19,6 +19,7 @@ from financial_dashboard.db import Account, Base, StatementUpload, Transaction
 from financial_dashboard.services.statements import cc as cc_module
 from financial_dashboard.services.statements.cc import (
     import_missing_cc_txns,
+    internal_transfer_debit_keys,
     is_internal_transfer_credit,
     load_account_card_masks,
     reconcile_statement,
@@ -69,11 +70,69 @@ def _parsed(debits: list[CcTransaction], credits: list[CcTransaction]):
     )
 
 
-def test_only_the_tagged_transfer_is_internal():
-    assert is_internal_transfer_credit(_row("credit", "emi_installment_transfer"))
-    assert not is_internal_transfer_credit(_row("credit", "cr_marker"))
-    assert not is_internal_transfer_credit(_row("credit"))
-    assert not is_internal_transfer_credit(SimpleNamespace(narration="x"))
+def test_only_a_tagged_credit_with_a_debit_twin_is_internal():
+    twin_keys = internal_transfer_debit_keys([_row("debit")])
+    no_keys = internal_transfer_debit_keys([])
+
+    assert is_internal_transfer_credit(
+        _row("credit", "emi_installment_transfer"), twin_keys
+    )
+    # The tag alone is not enough: with no debit twin the credit is real.
+    assert not is_internal_transfer_credit(
+        _row("credit", "emi_installment_transfer"), no_keys
+    )
+    # A twin alone is not enough either: an untagged credit stays a credit.
+    assert not is_internal_transfer_credit(_row("credit", "cr_marker"), twin_keys)
+    assert not is_internal_transfer_credit(_row("credit"), twin_keys)
+
+
+@pytest.mark.anyio
+async def test_tagged_credit_without_a_debit_twin_still_imports(session_factory):
+    """A reversed instalment prints as a tagged credit with no billed debit.
+
+    That credit reduces the payable amount, so it must import."""
+    async with session_factory() as session:
+        session.add(
+            Account(
+                id=ACCOUNT_ID,
+                bank="hsbc",
+                label="HSBC Credit Card",
+                type="credit_card",
+                account_number=CARD_NUMBER,
+            )
+        )
+        await session.commit()
+
+    parsed = _parsed(
+        debits=[],
+        credits=[_row("credit", "emi_installment_transfer")],
+    )
+
+    async with session_factory() as session:
+        card_masks = await load_account_card_masks(session, ACCOUNT_ID)
+    recon = reconcile_statement(parsed, [], ACCOUNT_ID, card_masks)
+
+    assert [(e["direction"], e["narration"]) for e in recon["missing"]] == [
+        ("credit", INSTALMENT),
+    ]
+
+    async with session_factory() as session:
+        upload = StatementUpload(
+            account_id=ACCOUNT_ID,
+            bank="hsbc",
+            filename="statement.pdf",
+            file_path="/nonexistent/statement.pdf",
+            status="parsed",
+        )
+        session.add(upload)
+        await session.flush()
+        account = await session.get(Account, ACCOUNT_ID)
+        await import_missing_cc_txns(session, upload, parsed, account, recon)
+        await session.commit()
+
+    async with session_factory() as session:
+        rows = list((await session.execute(select(Transaction))).scalars().all())
+    assert [(r.direction, r.counterparty) for r in rows] == [("credit", INSTALMENT)]
 
 
 @pytest.mark.anyio
