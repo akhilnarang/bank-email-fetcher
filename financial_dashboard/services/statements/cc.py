@@ -35,6 +35,7 @@ used inside async functions to avoid circular import issues.
 import asyncio
 import datetime
 import email as email_lib
+from collections import Counter
 import json
 import logging
 import tempfile
@@ -245,6 +246,63 @@ def _refresh_identity(txn: "ParsedCcTransaction") -> str:
 
 def _match_key(txn_date: date_type, amount: Decimal, direction: str) -> tuple:
     return (txn_date, amount, direction)
+
+
+# cc-parser tags a credit row that is bank-internal bookkeeping, not money
+# that reached the card. HSBC prints one such ``CR`` row before each billed
+# EMI instalment (``emi_installment_transfer``): it moves the instalment off
+# the loan ledger, the debit twin bills it, and the payable amount does not
+# change. Such a row is not a card transaction, so it must not become one.
+INTERNAL_TRANSFER_CREDIT_REASONS = frozenset({"emi_installment_transfer"})
+
+
+TwinKey = tuple[str | None, str, str, str]
+
+
+def _ledger_twin_key(txn: "ParsedCcTransaction") -> TwinKey:
+    return (txn.card_number, txn.date, txn.amount, txn.narration.upper())
+
+
+def internal_transfer_debit_twins(
+    debits: list["ParsedCcTransaction"],
+) -> Counter[TwinKey]:
+    """Count the debit rows a tagged credit may claim as its ledger twin.
+
+    The tag alone is not proof. cc-parser sets it from the narration, and
+    only treats the row as a transfer when a debit twin with the same date,
+    amount and narration exists. A tagged credit with no twin is a real
+    credit, such as a reversed instalment, and must stay a transaction.
+
+    The result is a count, not a set: each debit row is one twin, so two
+    tagged credits cannot both claim it. The key carries the card number, so
+    a row on one card cannot claim a twin on another.
+    """
+    return Counter(_ledger_twin_key(txn) for txn in debits)
+
+
+def claim_internal_transfer_twin(
+    txn: "ParsedCcTransaction",
+    twins: Counter[TwinKey],
+) -> bool:
+    """Claim a debit twin for a tagged credit row.
+
+    Args:
+        txn: A cc-parser credit row from ``parsed.payments_refunds``.
+        twins: Unclaimed debit twins, from ``internal_transfer_debit_twins``.
+            A successful claim consumes one.
+
+    Returns:
+        True when ``credit_reasons`` names an internal transfer and an
+        unclaimed debit twin exists on the same statement. The row is then
+        bank-internal bookkeeping, not a transaction.
+    """
+    if txn.credit_reasons not in INTERNAL_TRANSFER_CREDIT_REASONS:
+        return False
+    key = _ledger_twin_key(txn)
+    if twins[key] <= 0:
+        return False
+    twins[key] -= 1
+    return True
 
 
 def _normalize_narration(text: str | None) -> str:
@@ -502,7 +560,12 @@ def reconcile_statement(
     stmt_txns = []
     for txn in parsed.transactions or []:
         stmt_txns.append(("transactions", "debit", txn))
+    twins = internal_transfer_debit_twins(parsed.transactions or [])
     for txn in parsed.payments_refunds or []:
+        # Not a candidate-set predicate: the row is dropped as a non-transaction
+        # before any DB lookup, so it can neither match nor import.
+        if claim_internal_transfer_twin(txn, twins):
+            continue
         stmt_txns.append(("payments_refunds", "credit", txn))
 
     # Build DB candidate pool indexed by (date, amount, direction) for fast lookup
