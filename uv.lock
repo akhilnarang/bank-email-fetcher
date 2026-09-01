@@ -44,7 +44,7 @@ wheels = [
 [[package]]
 name = "bank-email-parser"
 version = "0.1.0"
-source = { git = "https://github.com/akhilnarang/bank-email-parser#b827ddb7f574ec4e6047083a161d50f495891ff1" }
+source = { git = "https://github.com/akhilnarang/bank-email-parser#d7c47e914bcee90bc0ac2451c3b6a87cf41fa9c0" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "pydantic" },
