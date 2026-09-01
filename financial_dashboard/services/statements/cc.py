@@ -247,6 +247,28 @@ def _match_key(txn_date: date_type, amount: Decimal, direction: str) -> tuple:
     return (txn_date, amount, direction)
 
 
+# cc-parser tags a credit row that is bank-internal bookkeeping, not money
+# that reached the card. HSBC prints one such ``CR`` row before each billed
+# EMI instalment (``emi_installment_transfer``): it moves the instalment off
+# the loan ledger, the debit twin bills it, and the payable amount does not
+# change. Such a row is not a card transaction, so it must not become one.
+INTERNAL_TRANSFER_CREDIT_REASONS = frozenset({"emi_installment_transfer"})
+
+
+def is_internal_transfer_credit(txn: "ParsedCcTransaction") -> bool:
+    """True when a parsed credit row is a bank-internal ledger transfer.
+
+    Args:
+        txn: A cc-parser credit row from ``parsed.payments_refunds``.
+
+    Returns:
+        True when ``credit_reasons`` names an internal transfer.
+    """
+    return (getattr(txn, "credit_reasons", None) or "") in (
+        INTERNAL_TRANSFER_CREDIT_REASONS
+    )
+
+
 def _normalize_narration(text: str | None) -> str:
     """Compose (NFC), lower-case, and collapse whitespace for a containment
     comparison.
@@ -503,6 +525,10 @@ def reconcile_statement(
     for txn in parsed.transactions or []:
         stmt_txns.append(("transactions", "debit", txn))
     for txn in parsed.payments_refunds or []:
+        # Not a candidate-set predicate: the row is dropped as a non-transaction
+        # before any DB lookup, so it can neither match nor import.
+        if is_internal_transfer_credit(txn):
+            continue
         stmt_txns.append(("payments_refunds", "credit", txn))
 
     # Build DB candidate pool indexed by (date, amount, direction) for fast lookup
