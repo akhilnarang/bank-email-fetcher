@@ -34,6 +34,20 @@ from bank_email_parser.models import Money, ParsedEmail, StatementSummary
 from . import _helpers as h
 
 
+def _days_from_today(days: int) -> datetime.date:
+    return datetime.date.today() + datetime.timedelta(days=days)
+
+
+def _due_this_month(day: int = 15) -> str:
+    """A due date in the current month, in the statement's DD/MM/YYYY form.
+
+    init_payment_tracking does not track a statement whose due date is
+    before the first of the current month. A fixed date passes that gate
+    only until the month ends, so the tests derive the date from today.
+    """
+    return datetime.date.today().replace(day=day).strftime("%d/%m/%Y")
+
+
 # Override the default _no_payment_tracking fixture: these tests WANT the real
 # (date-gated) init_payment_tracking + recompute logic, against the test maker.
 @pytest.fixture
@@ -211,7 +225,7 @@ async def test_init_payment_tracking_zero_due_marks_paid(maker):
             filename="cc.pdf",
             file_path="/tmp/cc.pdf",
             status="imported",
-            due_date="15/08/2026",
+            due_date=_due_this_month(),
             total_amount_due="0.00",
         )
         session.add(upload)
@@ -236,7 +250,7 @@ async def test_init_payment_tracking_positive_due_marks_unpaid(maker):
             filename="cc.pdf",
             file_path="/tmp/cc.pdf",
             status="imported",
-            due_date="15/08/2026",
+            due_date=_due_this_month(),
             total_amount_due="3,250.00",
             minimum_amount_due="500.00",
         )
@@ -265,13 +279,15 @@ async def test_init_payment_tracking_detects_prepaid_bill(maker):
             filename="cc.pdf",
             file_path="/tmp/cc.pdf",
             status="imported",
-            due_date="04/08/2026",
+            due_date=_days_from_today(-25).strftime("%d/%m/%Y"),
             total_amount_due="10,000.00",
             payment_status=PaymentStatus.PAID,
-            created_at=datetime.datetime(2026, 7, 18, tzinfo=datetime.UTC),
+            created_at=datetime.datetime.combine(
+                _days_from_today(-42), datetime.time(), tzinfo=datetime.UTC
+            ),
         )
         session.add(prior)
-        # Paid 8/16 — after prior's due (8/4), before the new statement exists.
+        # Paid after prior's due, before the new statement exists.
         session.add(
             Transaction(
                 account_id=acc_id,
@@ -279,7 +295,7 @@ async def test_init_payment_tracking_detects_prepaid_bill(maker):
                 email_type="hdfc_cc_payment_alert",
                 direction="credit",
                 amount=Decimal("750.00"),
-                transaction_date=datetime.date(2026, 8, 16),
+                transaction_date=_days_from_today(-13),
                 counterparty="Payment received",
             )
         )
@@ -292,9 +308,11 @@ async def test_init_payment_tracking_detects_prepaid_bill(maker):
             filename="cc.pdf",
             file_path="/tmp/cc.pdf",
             status="imported",
-            due_date="04/09/2026",
+            due_date=_days_from_today(6).strftime("%d/%m/%Y"),
             total_amount_due="750.00",
-            created_at=datetime.datetime(2026, 8, 18, tzinfo=datetime.UTC),
+            created_at=datetime.datetime.combine(
+                _days_from_today(-11), datetime.time(), tzinfo=datetime.UTC
+            ),
         )
         session.add(latest)
         await session.commit()
@@ -346,7 +364,7 @@ async def test_init_payment_tracking_idempotent(maker):
             filename="cc.pdf",
             file_path="/tmp/cc.pdf",
             status="imported",
-            due_date="15/08/2026",
+            due_date=_due_this_month(),
             total_amount_due="1,000.00",
         )
         session.add(upload)
