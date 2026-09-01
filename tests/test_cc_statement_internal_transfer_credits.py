@@ -18,9 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from financial_dashboard.db import Account, Base, StatementUpload, Transaction
 from financial_dashboard.services.statements import cc as cc_module
 from financial_dashboard.services.statements.cc import (
+    claim_internal_transfer_twin,
     import_missing_cc_txns,
-    internal_transfer_debit_keys,
-    is_internal_transfer_credit,
+    internal_transfer_debit_twins,
     load_account_card_masks,
     reconcile_statement,
 )
@@ -71,19 +71,45 @@ def _parsed(debits: list[CcTransaction], credits: list[CcTransaction]):
 
 
 def test_only_a_tagged_credit_with_a_debit_twin_is_internal():
-    twin_keys = internal_transfer_debit_keys([_row("debit")])
-    no_keys = internal_transfer_debit_keys([])
+    tagged = _row("credit", "emi_installment_transfer")
 
-    assert is_internal_transfer_credit(
-        _row("credit", "emi_installment_transfer"), twin_keys
+    assert claim_internal_transfer_twin(
+        tagged, internal_transfer_debit_twins([_row("debit")])
     )
     # The tag alone is not enough: with no debit twin the credit is real.
-    assert not is_internal_transfer_credit(
-        _row("credit", "emi_installment_transfer"), no_keys
-    )
+    assert not claim_internal_transfer_twin(tagged, internal_transfer_debit_twins([]))
     # A twin alone is not enough either: an untagged credit stays a credit.
-    assert not is_internal_transfer_credit(_row("credit", "cr_marker"), twin_keys)
-    assert not is_internal_transfer_credit(_row("credit"), twin_keys)
+    twins = internal_transfer_debit_twins([_row("debit")])
+    assert not claim_internal_transfer_twin(_row("credit", "cr_marker"), twins)
+    assert not claim_internal_transfer_twin(_row("credit"), twins)
+
+
+def test_each_debit_twin_is_claimed_once():
+    """One debit row is one twin. Two tagged credits cannot both claim it."""
+    tagged = _row("credit", "emi_installment_transfer")
+    twins = internal_transfer_debit_twins([_row("debit")])
+
+    assert claim_internal_transfer_twin(tagged, twins)
+    assert not claim_internal_transfer_twin(tagged, twins)
+
+    twins = internal_transfer_debit_twins([_row("debit"), _row("debit")])
+    assert claim_internal_transfer_twin(tagged, twins)
+    assert claim_internal_transfer_twin(tagged, twins)
+    assert not claim_internal_transfer_twin(tagged, twins)
+
+
+def test_a_twin_on_another_card_does_not_count():
+    other_card = CcTransaction(
+        date="15/07/2026",
+        narration=INSTALMENT,
+        amount="300.00",
+        card_number="4000XXXXXXXX0002",
+        transaction_type="debit",
+    )
+    twins = internal_transfer_debit_twins([other_card])
+    assert not claim_internal_transfer_twin(
+        _row("credit", "emi_installment_transfer"), twins
+    )
 
 
 @pytest.mark.anyio
