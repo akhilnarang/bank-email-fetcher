@@ -269,3 +269,47 @@ async def test_send_enrichment_notification_shows_seconds_for_overwritten_time()
             await send_enrichment_notification(123, diff, 12345, source="email")
     text = captured["text"]
     assert "12:55:35→12:55:20" in text
+
+
+@pytest.mark.anyio
+async def test_foreign_currency_amount_is_not_shown_in_rupees():
+    """A USD charge must carry its currency code, never the rupee sign."""
+    from financial_dashboard.services.telegram import send_transaction_notification
+
+    captured = {}
+
+    async def fake_send(app, *, chat_id, text):
+        captured["text"] = text
+
+    with patch("financial_dashboard.services.telegram.tg_app", new=object()):
+        with patch(
+            "financial_dashboard.services.telegram._send_with_retry",
+            new=AsyncMock(side_effect=fake_send),
+        ):
+            await send_transaction_notification(
+                7,
+                {
+                    "bank": "onecard",
+                    "direction": "debit",
+                    "amount": Decimal("12.34"),
+                    "currency": "USD",
+                    "counterparty": "CLOUDFLARE",
+                    "transaction_date": date(2026, 9, 3),
+                    "transaction_time": time(18, 41),
+                    "card_mask": "x1234",
+                    "account_label": "OneCard CC",
+                    "channel": "card",
+                },
+                chat_id=12345,
+                source="email",
+            )
+    assert "-USD 12.34" in captured["text"]
+    assert "₹" not in captured["text"]
+
+
+def test_format_money_defaults_to_rupees():
+    from financial_dashboard.services.telegram import format_money
+
+    assert format_money(Decimal("1234.5"), None) == "₹1,234.50"
+    assert format_money(Decimal("1234.5"), "INR") == "₹1,234.50"
+    assert format_money(Decimal("12.34"), "usd") == "USD 12.34"
