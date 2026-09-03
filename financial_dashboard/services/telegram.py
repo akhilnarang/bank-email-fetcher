@@ -147,6 +147,16 @@ async def _send_with_retry(app, *, chat_id, text, parse_mode="HTML", attempts=3)
             await asyncio.sleep(backoff)
 
 
+def format_money(amount, currency: str | None) -> str:
+    """Render an amount with its currency: "\u20b91,234.00" for INR, "USD 12.34"
+    for any other currency. A foreign amount must never wear the rupee sign."""
+    amount_str = f"{amount:,.2f}"
+    code = (currency or "INR").strip().upper()
+    if code == "INR":
+        return f"\u20b9{amount_str}"
+    return f"{html.escape(code)} {amount_str}"
+
+
 async def send_transaction_notification(
     txn_id: int,
     txn_info: dict,
@@ -185,8 +195,7 @@ async def send_transaction_notification(
             direction_emoji = "\U0001f7e2"
             direction_label = "CREDIT"
         sign = "-" if direction == "debit" else "+"
-        amount = txn_info.get("amount", 0)
-        amount_str = f"{amount:,.2f}"
+        money = format_money(txn_info.get("amount", 0), txn_info.get("currency"))
         bank = html.escape(str(txn_info.get("bank", "")).upper())
         counterparty = html.escape(str(txn_info.get("counterparty", "") or ""))
         card_mask = html.escape(str(txn_info.get("card_mask", "") or ""))
@@ -201,7 +210,7 @@ async def send_transaction_notification(
             f"{direction_emoji} <b>{bank}</b> {direction_label}"
             f"{' · via SMS' if source == 'sms' else ' · via Email' if source == 'email' else ''}"
             f"{id_suffix}",
-            f"<b>{sign}\u20b9{amount_str}</b>",
+            f"<b>{sign}{money}</b>",
         ]
         if counterparty:
             # Add channel badge if present
@@ -412,11 +421,10 @@ async def send_enrichment_notification(
         if txn_info:
             direction = txn_info.get("direction", "")
             sign = "-" if direction == "debit" else "+"
-            amount = txn_info.get("amount", 0)
-            amount_str = f"{amount:,.2f}"
+            money = format_money(txn_info.get("amount", 0), txn_info.get("currency"))
             bank = html.escape(str(txn_info.get("bank", "")).upper())
             counterparty = html.escape(str(txn_info.get("counterparty", "") or ""))
-            header = f"\U0001f504 <b>{bank}</b> #{txn_id} {sign}₹{amount_str}"
+            header = f"\U0001f504 <b>{bank}</b> #{txn_id} {sign}{money}"
             if counterparty:
                 header += f" {counterparty}"
             header += f" — {diff_text} ({badge})"
