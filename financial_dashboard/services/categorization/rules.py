@@ -96,6 +96,16 @@ FEE_REVERSAL_MARKERS: tuple[str, ...] = (
 )
 
 
+# Narration evidence for a share or fund dividend. Banks write the payout as
+# "<COMPANY> FINAL DIV 25 26" or "<FUND> DIV 2025 26". Whole-token matched, so
+# "div" cannot fire inside "individual" or a merchant name.
+DIVIDEND_MARKERS: tuple[str, ...] = (
+    "dividend",
+    "div",
+    "divd",
+)
+
+
 def _has_marker(text_norm: str, markers: tuple[str, ...]) -> bool:
     padded = f" {text_norm} "
     return any(f" {marker} " in padded for marker in markers)
@@ -200,6 +210,17 @@ def match_rules(fields: dict, config: RuleConfig) -> RuleResult | None:
         ):
             return RuleResult(CREDIT_CARD_PAYMENT_SLUG, 0.95)
 
+    # A dividend is income from a holding. It is never a person paying you
+    # back, so decide it before the merchant rules and the credit fallback. Not
+    # on a card: a card cannot receive a dividend, and the card block above
+    # owns card credits.
+    if (
+        direction == "credit"
+        and not is_card_credit
+        and _has_marker(text_norm, DIVIDEND_MARKERS)
+    ):
+        return RuleResult("other_income", 0.9)
+
     # Merchant/type rules run BEFORE the self-by-counterparty rule: a specific
     # narration signal (e.g. "CASHBACK FOR BILLPAY", a CRED payment) must win
     # over a weak "Self"/own-name counterparty label (common in bank statements).
@@ -221,6 +242,19 @@ def match_rules(fields: dict, config: RuleConfig) -> RuleResult | None:
             if category == "investment" and direction == "credit":
                 return RuleResult("investment_redemption", 0.9)
             return RuleResult(category, 0.9)
+
+    # An ACH credit is a NACH bulk payout, and on this ledger every one is a
+    # share dividend paid to the stockholder. The payer is the listed company,
+    # so "AXIS BANK LIMITED" here is the company that pays the dividend, not a
+    # bank moving money. Runs after the merchant rules so a narration-backed
+    # rule (a tax refund, an employer) still wins. Matches the parser channel,
+    # or the HDFC "ACH C-" narration when the channel is missing.
+    if (
+        direction == "credit"
+        and not is_card_credit
+        and (channel == "ach_credit" or text_norm.startswith("ach c "))
+    ):
+        return RuleResult("other_income", 0.9)
 
     # Self-transfer by counterparty token — only after no merchant/type rule hit.
     if any(
