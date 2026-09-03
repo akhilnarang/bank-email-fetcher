@@ -222,3 +222,46 @@ def test_load_rule_config_self_identifier_triggers_rule(monkeypatch):
     cfg = load_rule_config()
     r = match_rules(_f(cp="ALEX SAVINGS ACCOUNT", direction="credit"), cfg)
     assert r is not None and r.slug == "self_transfer"
+
+
+def test_dividend_credit_is_other_income():
+    for raw in (
+        "ACME HOTELS COMPANY LTD FINAL DIV 25 26",
+        "SOMEFUND FINAN DIV 2025 26",
+        "INTERIM DIVIDEND ACME LTD",
+    ):
+        r = match_rules(_f(raw=raw, direction="credit", channel="bank_statement"), CFG)
+        assert r is not None and r.slug == "other_income", raw
+
+
+def test_dividend_marker_is_whole_token_and_credit_only():
+    # "div" inside a word is not a dividend; a debit with the token is not one.
+    assert match_rules(_f(raw="INDIVIDUAL STORE", direction="credit"), CFG) is None
+    assert match_rules(_f(raw="ACME FINAL DIV 25 26", direction="debit"), CFG) is None
+
+
+def test_dividend_marker_does_not_fire_on_a_card():
+    fields = _f(raw="ACME FINAL DIV 25 26", direction="credit")
+    fields["account_type"] = "credit_card"
+    r = match_rules(fields, CFG)
+    assert r is not None and r.slug == "credit_card_payment"
+
+
+def test_ach_credit_is_a_dividend():
+    # Every ACH credit on this ledger is a share dividend. A listed bank as the
+    # payer is the company paying the dividend, not a bank moving money.
+    for cp, channel in (
+        ("ACH C- SOME BANK LIMITED-9573935", "ach_credit"),
+        ("ACH C- SOME BANK LIMITED-9573935", None),
+        ("ACH C- ACME MINING LTD-979620", "ach_credit"),
+    ):
+        r = match_rules(_f(cp=cp, direction="credit", channel=channel), CFG)
+        assert r is not None and r.slug == "other_income", (cp, channel)
+
+
+def test_ach_credit_rule_is_credit_only_and_yields_to_merchant_rules():
+    assert match_rules(_f(cp="ACH D- ACME LTD", channel="ach_debit"), CFG) is None
+    r = match_rules(
+        _f(cp="ACH C- PAYROLL INC-123", direction="credit", channel="ach_credit"), CFG
+    )
+    assert r is not None and r.slug == "salary"
